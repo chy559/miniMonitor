@@ -9,6 +9,8 @@ It is a native Win32 application with no runtime dependency beyond Windows itsel
 - Compact sidebar-style panel with soft metric cards and live sparklines
 - CPU, memory, disk capacity, disk I/O, and network throughput
 - GPU adapter display when Windows exposes display-device information
+- Top CPU, memory, and GPU process summaries
+- Optional Codex quota card using the local Codex ChatGPT sign-in token
 - System tray integration with show / exit menu
 - Single-file executable build output
 

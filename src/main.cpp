@@ -20,14 +20,19 @@
 #include <tlhelp32.h>
 #include <pdh.h>
 #include <pdhmsg.h>
+#include <winhttp.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cwctype>
 #include <deque>
+#include <map>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -59,6 +64,19 @@ struct ProcessRow {
     std::wstring name;
     DWORD pid = 0;
     SIZE_T memory = 0;
+    double cpu = 0.0;
+    double gpu = -1.0;
+};
+
+struct CodexQuota {
+    bool checked = false;
+    bool available = false;
+    std::wstring status = L"Not checked";
+    std::wstring fiveHour = L"N/A";
+    std::wstring fiveHourReset = L"N/A";
+    std::wstring sevenDay = L"N/A";
+    std::wstring sevenDayReset = L"N/A";
+    ULONGLONG lastCheckedTick = 0;
 };
 
 struct Metrics {
@@ -75,7 +93,10 @@ struct Metrics {
     unsigned long long diskUsed = 0;
     unsigned long long diskTotal = 0;
     std::wstring gpuName = L"N/A";
-    std::vector<ProcessRow> processes;
+    std::vector<ProcessRow> topMemory;
+    std::vector<ProcessRow> topCpu;
+    std::vector<ProcessRow> topGpu;
+    CodexQuota quota;
 };
 
 struct CpuSnapshot {
@@ -123,6 +144,116 @@ std::wstring formatPercent(double value) {
     wchar_t buffer[32];
     swprintf(buffer, 32, L"%.0f%%", std::clamp(value, 0.0, 1.0) * 100.0);
     return buffer;
+}
+
+std::wstring formatOneDecimalPercent(double value) {
+    wchar_t buffer[32];
+    swprintf(buffer, 32, L"%.1f%%", std::max(0.0, value));
+    return buffer;
+}
+
+std::wstring utf8ToWide(const std::string& value) {
+    if (value.empty()) {
+        return L"";
+    }
+    int size = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (size <= 0) {
+        return L"";
+    }
+    std::wstring out(size, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), size);
+    return out;
+}
+
+bool readUtf8File(const std::wstring& path, std::string& out) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > 1024 * 1024) {
+        CloseHandle(file);
+        return false;
+    }
+    out.resize(static_cast<size_t>(size.QuadPart));
+    DWORD read = 0;
+    bool ok = ReadFile(file, out.data(), static_cast<DWORD>(out.size()), &read, nullptr) && read == out.size();
+    CloseHandle(file);
+    return ok;
+}
+
+std::string extractJsonString(const std::string& json, const std::string& key) {
+    const std::string needle = "\"" + key + "\"";
+    size_t keyPos = json.find(needle);
+    if (keyPos == std::string::npos) {
+        return "";
+    }
+    size_t colon = json.find(':', keyPos + needle.size());
+    if (colon == std::string::npos) {
+        return "";
+    }
+    size_t quote = json.find('"', colon + 1);
+    if (quote == std::string::npos) {
+        return "";
+    }
+    std::string out;
+    bool escape = false;
+    for (size_t i = quote + 1; i < json.size(); ++i) {
+        char ch = json[i];
+        if (escape) {
+            out.push_back(ch);
+            escape = false;
+        } else if (ch == '\\') {
+            escape = true;
+        } else if (ch == '"') {
+            break;
+        } else {
+            out.push_back(ch);
+        }
+    }
+    return out;
+}
+
+bool extractNumberAfter(const std::string& json, size_t start, const std::vector<std::string>& keys, double& value) {
+    size_t best = std::string::npos;
+    for (const auto& key : keys) {
+        size_t pos = json.find("\"" + key + "\"", start);
+        if (pos != std::string::npos && (best == std::string::npos || pos < best)) {
+            best = pos;
+        }
+    }
+    if (best == std::string::npos || best > start + 900) {
+        return false;
+    }
+    size_t colon = json.find(':', best);
+    if (colon == std::string::npos) {
+        return false;
+    }
+    size_t begin = json.find_first_of("-0123456789", colon + 1);
+    if (begin == std::string::npos || begin > colon + 40) {
+        return false;
+    }
+    char* end = nullptr;
+    value = std::strtod(json.c_str() + begin, &end);
+    return end && end != json.c_str() + begin;
+}
+
+std::wstring extractStringAfter(const std::string& json, size_t start, const std::vector<std::string>& keys) {
+    size_t best = std::string::npos;
+    std::string bestKey;
+    for (const auto& key : keys) {
+        size_t pos = json.find("\"" + key + "\"", start);
+        if (pos != std::string::npos && (best == std::string::npos || pos < best)) {
+            best = pos;
+            bestKey = key;
+        }
+    }
+    if (best == std::string::npos || best > start + 900) {
+        return L"N/A";
+    }
+    std::string value = extractJsonString(json.substr(best), bestKey);
+    return value.empty() ? L"N/A" : utf8ToWide(value);
 }
 
 std::wstring computerName() {
@@ -229,12 +360,19 @@ class SystemSampler {
 public:
     SystemSampler() {
         queryDiskCounters();
+        queryGpuCounters();
         gpuName_ = detectGpuName();
+        SYSTEM_INFO info{};
+        GetSystemInfo(&info);
+        processorCount_ = std::max<DWORD>(1, info.dwNumberOfProcessors);
     }
 
     ~SystemSampler() {
         if (pdhQuery_) {
             PdhCloseQuery(pdhQuery_);
+        }
+        if (gpuQuery_) {
+            PdhCloseQuery(gpuQuery_);
         }
     }
 
@@ -246,7 +384,9 @@ public:
         sampleNetwork(metrics);
         sampleDiskIo(metrics);
         metrics.gpuName = gpuName_;
-        metrics.processes = sampleProcesses();
+        sampleProcesses(metrics);
+        sampleGpuProcesses(metrics);
+        sampleCodexQuota(metrics);
         return metrics;
     }
 
@@ -256,7 +396,13 @@ private:
     PDH_HQUERY pdhQuery_ = nullptr;
     PDH_HCOUNTER diskReadCounter_ = nullptr;
     PDH_HCOUNTER diskWriteCounter_ = nullptr;
+    PDH_HQUERY gpuQuery_ = nullptr;
+    PDH_HCOUNTER gpuCounter_ = nullptr;
     std::wstring gpuName_;
+    DWORD processorCount_ = 1;
+    ULONGLONG processSampleTick_ = 0;
+    std::map<DWORD, ULONGLONG> previousProcessTimes_;
+    CodexQuota cachedQuota_;
 
     double sampleCpu() {
         FILETIME idleTime{}, kernelTime{}, userTime{};
@@ -376,6 +522,40 @@ private:
         PdhCollectQueryData(pdhQuery_);
     }
 
+    void queryGpuCounters() {
+        if (PdhOpenQueryW(nullptr, 0, &gpuQuery_) != ERROR_SUCCESS) {
+            gpuQuery_ = nullptr;
+            return;
+        }
+
+        using AddEnglishCounter = PDH_STATUS(WINAPI*)(PDH_HQUERY, LPCWSTR, DWORD_PTR, PDH_HCOUNTER*);
+        HMODULE pdh = LoadLibraryW(L"pdh.dll");
+        AddEnglishCounter addEnglishCounter = nullptr;
+        if (pdh) {
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
+            addEnglishCounter = reinterpret_cast<AddEnglishCounter>(GetProcAddress(pdh, "PdhAddEnglishCounterW"));
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+        }
+        const auto addCounter = addEnglishCounter ? addEnglishCounter : PdhAddCounterW;
+
+        const auto status = addCounter(gpuQuery_, L"\\GPU Engine(*)\\Utilization Percentage", 0, &gpuCounter_);
+        if (pdh) {
+            FreeLibrary(pdh);
+        }
+        if (status != ERROR_SUCCESS) {
+            PdhCloseQuery(gpuQuery_);
+            gpuQuery_ = nullptr;
+            gpuCounter_ = nullptr;
+            return;
+        }
+        PdhCollectQueryData(gpuQuery_);
+    }
+
     void sampleDiskIo(Metrics& metrics) {
         if (!pdhQuery_) {
             return;
@@ -411,12 +591,18 @@ private:
         return L"N/A";
     }
 
-    std::vector<ProcessRow> sampleProcesses() {
+    void sampleProcesses(Metrics& metrics) {
         std::vector<ProcessRow> rows;
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snapshot == INVALID_HANDLE_VALUE) {
-            return rows;
+            return;
         }
+
+        const ULONGLONG now = GetTickCount64();
+        const double elapsed = processSampleTick_ > 0 && now > processSampleTick_
+            ? static_cast<double>(now - processSampleTick_) / 1000.0
+            : 0.0;
+        std::map<DWORD, ULONGLONG> currentTimes;
 
         PROCESSENTRY32W entry{};
         entry.dwSize = sizeof(entry);
@@ -425,8 +611,20 @@ private:
                 PROCESS_MEMORY_COUNTERS pmc{};
                 HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, entry.th32ProcessID);
                 if (process) {
+                    FILETIME createTime{}, exitTime{}, kernelTime{}, userTime{};
+                    ULONGLONG procTime = 0;
+                    if (GetProcessTimes(process, &createTime, &exitTime, &kernelTime, &userTime)) {
+                        procTime = fileTimeToUInt64(kernelTime) + fileTimeToUInt64(userTime);
+                        currentTimes[entry.th32ProcessID] = procTime;
+                    }
                     if (GetProcessMemoryInfo(process, &pmc, sizeof(pmc))) {
-                        rows.push_back({entry.szExeFile, entry.th32ProcessID, pmc.WorkingSetSize});
+                        double cpu = 0.0;
+                        auto previous = previousProcessTimes_.find(entry.th32ProcessID);
+                        if (elapsed > 0.0 && previous != previousProcessTimes_.end() && procTime >= previous->second) {
+                            cpu = ((static_cast<double>(procTime - previous->second) / 10000000.0) / elapsed) *
+                                  100.0 / static_cast<double>(processorCount_);
+                        }
+                        rows.push_back({entry.szExeFile, entry.th32ProcessID, pmc.WorkingSetSize, cpu, -1.0});
                     }
                     CloseHandle(process);
                 }
@@ -434,13 +632,277 @@ private:
         }
         CloseHandle(snapshot);
 
-        std::sort(rows.begin(), rows.end(), [](const ProcessRow& a, const ProcessRow& b) {
+        previousProcessTimes_ = std::move(currentTimes);
+        processSampleTick_ = now;
+
+        metrics.topMemory = rows;
+        std::sort(metrics.topMemory.begin(), metrics.topMemory.end(), [](const ProcessRow& a, const ProcessRow& b) {
             return a.memory > b.memory;
         });
-        if (rows.size() > 8) {
-            rows.resize(8);
+        if (metrics.topMemory.size() > 3) {
+            metrics.topMemory.resize(3);
         }
-        return rows;
+
+        metrics.topCpu = std::move(rows);
+        std::sort(metrics.topCpu.begin(), metrics.topCpu.end(), [](const ProcessRow& a, const ProcessRow& b) {
+            return a.cpu > b.cpu;
+        });
+        if (metrics.topCpu.size() > 3) {
+            metrics.topCpu.resize(3);
+        }
+    }
+
+    void sampleGpuProcesses(Metrics& metrics) {
+        if (!gpuQuery_ || !gpuCounter_) {
+            return;
+        }
+        if (PdhCollectQueryData(gpuQuery_) != ERROR_SUCCESS) {
+            return;
+        }
+
+        DWORD bufferSize = 0;
+        DWORD itemCount = 0;
+        PDH_STATUS status = PdhGetFormattedCounterArrayW(gpuCounter_, PDH_FMT_DOUBLE, &bufferSize, &itemCount, nullptr);
+        if (status != static_cast<PDH_STATUS>(PDH_MORE_DATA) || bufferSize == 0 || itemCount == 0) {
+            return;
+        }
+
+        std::vector<BYTE> buffer(bufferSize);
+        auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+        status = PdhGetFormattedCounterArrayW(gpuCounter_, PDH_FMT_DOUBLE, &bufferSize, &itemCount, items);
+        if (status != ERROR_SUCCESS) {
+            return;
+        }
+
+        std::map<DWORD, double> usageByPid;
+        for (DWORD i = 0; i < itemCount; ++i) {
+            if (items[i].FmtValue.CStatus != ERROR_SUCCESS || !items[i].szName) {
+                continue;
+            }
+            std::wstring instance = items[i].szName;
+            size_t pidPos = instance.find(L"pid_");
+            if (pidPos == std::wstring::npos) {
+                continue;
+            }
+            pidPos += 4;
+            DWORD pid = 0;
+            while (pidPos < instance.size() && iswdigit(instance[pidPos])) {
+                pid = pid * 10 + static_cast<DWORD>(instance[pidPos] - L'0');
+                ++pidPos;
+            }
+            if (pid != 0) {
+                usageByPid[pid] += std::max(0.0, items[i].FmtValue.doubleValue);
+            }
+        }
+
+        for (const auto& [pid, gpu] : usageByPid) {
+            if (gpu <= 0.05) {
+                continue;
+            }
+            ProcessRow row;
+            row.pid = pid;
+            row.gpu = gpu;
+            row.name = processName(pid);
+            metrics.topGpu.push_back(row);
+        }
+        std::sort(metrics.topGpu.begin(), metrics.topGpu.end(), [](const ProcessRow& a, const ProcessRow& b) {
+            return a.gpu > b.gpu;
+        });
+        if (metrics.topGpu.size() > 3) {
+            metrics.topGpu.resize(3);
+        }
+    }
+
+    std::wstring processName(DWORD pid) {
+        std::wstring name = L"pid " + std::to_wstring(pid);
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!process) {
+            return name;
+        }
+        wchar_t buffer[MAX_PATH]{};
+        DWORD size = MAX_PATH;
+        if (QueryFullProcessImageNameW(process, 0, buffer, &size)) {
+            std::wstring path(buffer, size);
+            size_t slash = path.find_last_of(L"\\/");
+            name = slash == std::wstring::npos ? path : path.substr(slash + 1);
+        }
+        CloseHandle(process);
+        return name;
+    }
+
+    void sampleCodexQuota(Metrics& metrics) {
+        const ULONGLONG now = GetTickCount64();
+        if (cachedQuota_.checked && now >= cachedQuota_.lastCheckedTick &&
+            now - cachedQuota_.lastCheckedTick < 5ULL * 60ULL * 1000ULL) {
+            metrics.quota = cachedQuota_;
+            return;
+        }
+
+        cachedQuota_ = fetchCodexQuota();
+        cachedQuota_.lastCheckedTick = now;
+        metrics.quota = cachedQuota_;
+    }
+
+    CodexQuota fetchCodexQuota() {
+        CodexQuota quota;
+        quota.checked = true;
+        quota.status = L"Auth not found";
+
+        wchar_t userProfile[MAX_PATH]{};
+        DWORD userProfileSize = GetEnvironmentVariableW(L"USERPROFILE", userProfile, MAX_PATH);
+        if (userProfileSize == 0 || userProfileSize >= MAX_PATH) {
+            return quota;
+        }
+
+        std::wstring authPath = std::wstring(userProfile) + L"\\.codex\\auth.json";
+        std::string authJson;
+        if (!readUtf8File(authPath, authJson)) {
+            return quota;
+        }
+
+        std::string accessToken = extractJsonString(authJson, "access_token");
+        if (accessToken.empty()) {
+            quota.status = L"ChatGPT token missing";
+            return quota;
+        }
+
+        const std::vector<std::wstring> paths = {
+            L"/backend-api/codex/usage_limits",
+            L"/backend-api/codex/usage",
+            L"/backend-api/conversation_limit"
+        };
+        for (const auto& path : paths) {
+            DWORD statusCode = 0;
+            std::string body = httpGetChatGpt(path, accessToken, statusCode);
+            if (statusCode >= 200 && statusCode < 300 && !body.empty()) {
+                parseQuotaBody(body, quota);
+                if (quota.available) {
+                    return quota;
+                }
+                quota.status = L"Quota response unreadable";
+            } else if (statusCode == 401 || statusCode == 403) {
+                quota.status = L"Login expired";
+                return quota;
+            }
+        }
+        if (!quota.available && quota.status == L"Auth not found") {
+            quota.status = L"Quota unavailable";
+        }
+        return quota;
+    }
+
+    std::string httpGetChatGpt(const std::wstring& path, const std::string& accessToken, DWORD& statusCode) {
+        statusCode = 0;
+        std::string response;
+
+        HINTERNET session = WinHttpOpen(L"MiniMonitor/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!session) {
+            return response;
+        }
+        WinHttpSetTimeouts(session, 2000, 2000, 2500, 2500);
+
+        HINTERNET connect = WinHttpConnect(session, L"chatgpt.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+        if (!connect) {
+            WinHttpCloseHandle(session);
+            return response;
+        }
+
+        HINTERNET request = WinHttpOpenRequest(connect, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                               WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (!request) {
+            WinHttpCloseHandle(connect);
+            WinHttpCloseHandle(session);
+            return response;
+        }
+
+        std::string authHeader = "Authorization: Bearer " + accessToken + "\r\nAccept: application/json\r\n";
+        std::wstring headers = utf8ToWide(authHeader);
+        BOOL ok = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(headers.size()),
+                                     WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+                  WinHttpReceiveResponse(request, nullptr);
+
+        if (ok) {
+            DWORD size = sizeof(statusCode);
+            WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &size, WINHTTP_NO_HEADER_INDEX);
+            DWORD available = 0;
+            while (WinHttpQueryDataAvailable(request, &available) && available > 0 && response.size() < 1024 * 1024) {
+                std::string chunk(available, '\0');
+                DWORD read = 0;
+                if (!WinHttpReadData(request, chunk.data(), available, &read) || read == 0) {
+                    break;
+                }
+                chunk.resize(read);
+                response += chunk;
+            }
+        }
+
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        return response;
+    }
+
+    void parseQuotaBody(const std::string& body, CodexQuota& quota) {
+        auto parseWindow = [&](const std::vector<std::string>& markers,
+                               std::wstring& amount,
+                               std::wstring& reset) {
+            size_t pos = std::string::npos;
+            for (const auto& marker : markers) {
+                pos = body.find(marker);
+                if (pos != std::string::npos) {
+                    break;
+                }
+            }
+            if (pos == std::string::npos) {
+                return false;
+            }
+
+            double remaining = 0.0;
+            double used = 0.0;
+            if (extractNumberAfter(body, pos, {"remaining_percent", "remaining_percentage", "percent_remaining"}, remaining)) {
+                if (remaining > 1.0) {
+                    remaining /= 100.0;
+                }
+                amount = formatPercent(std::clamp(remaining, 0.0, 1.0)) + L" left";
+            } else if (extractNumberAfter(body, pos, {"used_percent", "used_percentage", "usage_percent", "percent_used"}, used)) {
+                if (used > 1.0) {
+                    used /= 100.0;
+                }
+                amount = formatPercent(1.0 - std::clamp(used, 0.0, 1.0)) + L" left";
+            } else {
+                amount = L"Available";
+            }
+
+            reset = extractStringAfter(body, pos, {"resets_at", "reset_at", "reset_time", "next_reset_at"});
+            if (reset == L"N/A") {
+                double seconds = 0.0;
+                if (extractNumberAfter(body, pos, {"reset_after_seconds", "seconds_until_reset"}, seconds)) {
+                    int totalMinutes = static_cast<int>(seconds / 60.0);
+                    reset = std::to_wstring(totalMinutes / 60) + L"h " + std::to_wstring(totalMinutes % 60) + L"m";
+                }
+            }
+            return true;
+        };
+
+        bool five = parseWindow({"5h", "5_hour", "five_hour", "short"}, quota.fiveHour, quota.fiveHourReset);
+        bool seven = parseWindow({"7d", "7_day", "seven_day", "weekly", "long"}, quota.sevenDay, quota.sevenDayReset);
+
+        if (!five && !seven) {
+            double remaining = 0.0;
+            if (extractNumberAfter(body, 0, {"remaining_percent", "remaining_percentage", "percent_remaining"}, remaining)) {
+                if (remaining > 1.0) {
+                    remaining /= 100.0;
+                }
+                quota.fiveHour = formatPercent(std::clamp(remaining, 0.0, 1.0)) + L" left";
+                quota.fiveHourReset = extractStringAfter(body, 0, {"resets_at", "reset_at", "next_reset_at"});
+                five = true;
+            }
+        }
+
+        quota.available = five || seven;
+        quota.status = quota.available ? L"Codex quota" : L"Quota unavailable";
     }
 };
 
@@ -675,6 +1137,7 @@ private:
         format.SetAlignment(horizontal);
         format.SetLineAlignment(vertical);
         format.SetTrimming(StringTrimmingEllipsisCharacter);
+        format.SetFormatFlags(StringFormatFlagsNoWrap);
         g.DrawString(text.c_str(), -1, &font, rect, &format, &brush);
     }
 
@@ -744,22 +1207,27 @@ private:
         const REAL top = 96.0f;
         const REAL halfW = (width - margin * 2.0f - gap) / 2.0f;
 
-        drawMetricCard(g, RectF(margin, top, halfW, 154), L"CPU", formatPercent(metrics_.cpu),
+        drawMetricCard(g, RectF(margin, top, halfW, 132), L"CPU", formatPercent(metrics_.cpu),
                        L"系统负载", cpuHistory_, colorFromHex(83, 118, 224));
-        drawGpuCard(g, RectF(margin + halfW + gap, top, halfW, 154));
-        drawMemoryCard(g, RectF(margin, top + 166, width - margin * 2.0f, 126));
+        drawGpuCard(g, RectF(margin + halfW + gap, top, halfW, 132));
+        drawMemoryCard(g, RectF(margin, top + 144, width - margin * 2.0f, 104));
 
-        const REAL rowY = top + 304;
-        drawSmallStatCard(g, RectF(margin, rowY, halfW, 112), L"Network",
+        const REAL quotaY = top + 260;
+        drawQuotaCard(g, RectF(margin, quotaY, width - margin * 2.0f, 88));
+
+        const REAL appsY = quotaY + 100;
+        drawTopAppsCard(g, RectF(margin, appsY, width - margin * 2.0f, 126));
+
+        const REAL rowY = appsY + 138;
+        drawSmallStatCard(g, RectF(margin, rowY, halfW, 76), L"Network",
                           L"↓ " + formatSpeed(metrics_.netDown),
                           L"↑ " + formatSpeed(metrics_.netUp),
                           colorFromHex(74, 147, 224));
-        drawSmallStatCard(g, RectF(margin + halfW + gap, rowY, halfW, 112), L"Disk",
+        drawSmallStatCard(g, RectF(margin + halfW + gap, rowY, halfW, 76), L"Disk",
                           formatBytes(static_cast<double>(metrics_.diskUsed)) + L" / " +
                               formatBytes(static_cast<double>(metrics_.diskTotal)),
                           L"Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A"),
                           colorFromHex(248, 188, 77));
-        drawInfoStrip(g, RectF(margin, rowY + 124, width - margin * 2.0f, 84));
         drawFooter(g, width, height);
     }
 
@@ -829,21 +1297,81 @@ private:
         drawText(g,
                  formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
                      formatBytes(static_cast<double>(metrics_.memoryTotal)),
-                 RectF(rect.X + 20, rect.Y + 84, 170, 22), small, colorFromHex(55, 50, 64));
-        drawSparkline(g, RectF(rect.X + rect.Width - 130, rect.Y + 82, 108, 26), memoryHistory_, colorFromHex(223, 157, 67));
+                 RectF(rect.X + 20, rect.Y + 78, 170, 20), small, colorFromHex(55, 50, 64));
+        drawSparkline(g, RectF(rect.X + rect.Width - 130, rect.Y + 76, 108, 18), memoryHistory_, colorFromHex(223, 157, 67));
+    }
+
+    void drawQuotaCard(Graphics& g, RectF rect) {
+        drawPanel(g, rect);
+        Font title = makeFont(16, FontStyleBold);
+        Font label = makeFont(12, FontStyleBold);
+        Font value = makeFont(13, FontStyleBold);
+
+        drawText(g, L"Codex Quota", RectF(rect.X + 18, rect.Y + 12, 170, 22), title, colorFromHex(35, 32, 43));
+        drawText(g, metrics_.quota.status, RectF(rect.X + rect.Width - 150, rect.Y + 13, 128, 20), label,
+                 metrics_.quota.available ? colorFromHex(63, 119, 88) : colorFromHex(148, 70, 70), StringAlignmentFar);
+
+        drawQuotaLine(g, rect.X + 18, rect.Y + 40, L"5h", metrics_.quota.fiveHour, metrics_.quota.fiveHourReset, value);
+        drawQuotaLine(g, rect.X + 18, rect.Y + 62, L"7d", metrics_.quota.sevenDay, metrics_.quota.sevenDayReset, value);
+    }
+
+    void drawQuotaLine(Graphics& g, REAL x, REAL y, const std::wstring& window, const std::wstring& left,
+                       const std::wstring& reset, Font& font) {
+        drawText(g, window, RectF(x, y, 28, 18), font, colorFromHex(65, 58, 74));
+        drawText(g, left, RectF(x + 38, y, 100, 18), font, colorFromHex(48, 44, 58));
+        drawText(g, L"reset " + reset, RectF(x + 145, y, 210, 18), font, colorFromHex(82, 74, 92));
+    }
+
+    void drawTopAppsCard(Graphics& g, RectF rect) {
+        drawPanel(g, rect);
+        Font title = makeFont(16, FontStyleBold);
+        Font row = makeFont(12, FontStyleBold);
+
+        drawText(g, L"Top Apps", RectF(rect.X + 18, rect.Y + 12, 130, 22), title, colorFromHex(35, 32, 43));
+        drawTopProcessLine(g, rect.X + 18, rect.Y + 39, L"CPU", metrics_.topCpu, row, colorFromHex(83, 118, 224));
+        drawTopProcessLine(g, rect.X + 18, rect.Y + 64, L"MEM", metrics_.topMemory, row, colorFromHex(99, 118, 225));
+        drawTopProcessLine(g, rect.X + 18, rect.Y + 89, L"GPU", metrics_.topGpu, row, colorFromHex(95, 159, 118));
+    }
+
+    void drawTopProcessLine(Graphics& g, REAL x, REAL y, const std::wstring& label, const std::vector<ProcessRow>& rows,
+                            Font& font, Color accent) {
+        SolidBrush dot(accent);
+        g.FillEllipse(&dot, x, y + 5.0f, 8.0f, 8.0f);
+        drawText(g, label, RectF(x + 14, y, 36, 18), font, colorFromHex(65, 58, 74));
+        if (rows.empty()) {
+            drawText(g, L"N/A", RectF(x + 54, y, 260, 18), font, colorFromHex(112, 104, 118));
+            return;
+        }
+
+        std::wstring names;
+        for (size_t i = 0; i < std::min<size_t>(2, rows.size()); ++i) {
+            if (!names.empty()) {
+                names += L"  ";
+            }
+            names += rows[i].name;
+            names += L" ";
+            if (label == L"CPU") {
+                names += formatOneDecimalPercent(rows[i].cpu);
+            } else if (label == L"MEM") {
+                names += formatBytes(static_cast<double>(rows[i].memory));
+            } else {
+                names += formatOneDecimalPercent(rows[i].gpu);
+            }
+        }
+        drawText(g, names, RectF(x + 54, y, 318, 18), font, colorFromHex(48, 44, 58));
     }
 
     void drawSmallStatCard(Graphics& g, RectF rect, const std::wstring& title, const std::wstring& primary,
                            const std::wstring& secondary, Color accent) {
         drawPanel(g, rect);
-        Font label = makeFont(17, FontStyleBold);
+        Font label = makeFont(15, FontStyleBold);
         Font value = makeFont(14, FontStyleBold);
 
-        drawText(g, title, RectF(rect.X + 18, rect.Y + 16, rect.Width - 36, 22), label, colorFromHex(35, 32, 43));
-        drawLegend(g, rect.X + 18, rect.Y + 51, primary, accent);
-        drawLegend(g, rect.X + 18, rect.Y + 78, secondary, colorFromHex(87, 169, 130));
+        drawText(g, title, RectF(rect.X + 18, rect.Y + 12, rect.Width - 36, 20), label, colorFromHex(35, 32, 43));
+        drawLegend(g, rect.X + 18, rect.Y + 34, primary, accent);
+        drawLegend(g, rect.X + 18, rect.Y + 56, secondary, colorFromHex(87, 169, 130));
 
-        RectF mini(rect.X + rect.Width - 60, rect.Y + 20, 38, 38);
+        RectF mini(rect.X + rect.Width - 56, rect.Y + 14, 32, 32);
         auto path = roundedRect(mini, 8.0f);
         SolidBrush brush(Color(82, accent.GetR(), accent.GetG(), accent.GetB()));
         g.FillPath(&brush, path.get());
@@ -963,7 +1491,7 @@ private:
 
         REAL y = rect.Y + 90;
         const REAL rowHeight = 30;
-        for (const auto& process : metrics_.processes) {
+        for (const auto& process : metrics_.topMemory) {
             SolidBrush rowBg(Color(28, 255, 255, 255));
             if (static_cast<int>((y - rect.Y) / rowHeight) % 2 == 0) {
                 auto rowPath = roundedRect(RectF(rect.X + 14, y - 4, rect.Width - 28, rowHeight), 6.0f);
