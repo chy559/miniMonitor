@@ -71,9 +71,12 @@ struct ProcessRow {
 struct CodexQuota {
     bool checked = false;
     bool available = false;
+    bool localAuth = false;
     std::wstring status = L"Not checked";
+    std::wstring firstLabel = L"5h";
     std::wstring fiveHour = L"N/A";
     std::wstring fiveHourReset = L"N/A";
+    std::wstring secondLabel = L"7d";
     std::wstring sevenDay = L"N/A";
     std::wstring sevenDayReset = L"N/A";
     ULONGLONG lastCheckedTick = 0;
@@ -254,6 +257,33 @@ std::wstring extractStringAfter(const std::string& json, size_t start, const std
     }
     std::string value = extractJsonString(json.substr(best), bestKey);
     return value.empty() ? L"N/A" : utf8ToWide(value);
+}
+
+std::wstring compactIsoTime(const std::string& value) {
+    if (value.empty()) {
+        return L"N/A";
+    }
+    std::string compact = value;
+    size_t dot = compact.find('.');
+    if (dot != std::string::npos) {
+        compact.erase(dot);
+    }
+    if (!compact.empty() && compact.back() == 'Z') {
+        compact.pop_back();
+    }
+    std::replace(compact.begin(), compact.end(), 'T', ' ');
+    if (compact.size() >= 16) {
+        compact.resize(16);
+    }
+    return utf8ToWide(compact);
+}
+
+std::wstring maskAccountId(const std::string& accountId) {
+    if (accountId.empty()) {
+        return L"Local auth";
+    }
+    const size_t keep = std::min<size_t>(8, accountId.size());
+    return L"..." + utf8ToWide(accountId.substr(accountId.size() - keep));
 }
 
 std::wstring computerName() {
@@ -760,9 +790,10 @@ private:
             return quota;
         }
 
+        quota = localCodexSnapshot(authJson);
+
         std::string accessToken = extractJsonString(authJson, "access_token");
         if (accessToken.empty()) {
-            quota.status = L"ChatGPT token missing";
             return quota;
         }
 
@@ -779,14 +810,37 @@ private:
                 if (quota.available) {
                     return quota;
                 }
-                quota.status = L"Quota response unreadable";
+                quota.status = quota.localAuth ? L"Local account" : L"Quota unreadable";
             } else if (statusCode == 401 || statusCode == 403) {
-                quota.status = L"Login expired";
                 return quota;
             }
         }
-        if (!quota.available && quota.status == L"Auth not found") {
+        if (!quota.available && !quota.localAuth && quota.status == L"Auth not found") {
             quota.status = L"Quota unavailable";
+        }
+        return quota;
+    }
+
+    CodexQuota localCodexSnapshot(const std::string& authJson) {
+        CodexQuota quota;
+        quota.checked = true;
+        quota.localAuth = true;
+        quota.status = L"Local account";
+        quota.firstLabel = L"ID";
+        quota.secondLabel = L"Sync";
+
+        std::string accountId = extractJsonString(authJson, "account_id");
+        std::string lastRefresh = extractJsonString(authJson, "last_refresh");
+        std::string accessToken = extractJsonString(authJson, "access_token");
+
+        quota.fiveHour = maskAccountId(accountId);
+        quota.fiveHourReset = accessToken.empty() ? L"token missing" : L"token present";
+        quota.sevenDay = L"auth.json";
+        quota.sevenDayReset = compactIsoTime(lastRefresh);
+
+        if (accountId.empty() && accessToken.empty()) {
+            quota.localAuth = false;
+            quota.status = L"Auth incomplete";
         }
         return quota;
     }
@@ -902,7 +956,14 @@ private:
         }
 
         quota.available = five || seven;
-        quota.status = quota.available ? L"Codex quota" : L"Quota unavailable";
+        if (quota.available) {
+            quota.localAuth = false;
+            quota.status = L"Codex quota";
+            quota.firstLabel = L"5h";
+            quota.secondLabel = L"7d";
+        } else if (!quota.localAuth) {
+            quota.status = L"Quota unavailable";
+        }
     }
 };
 
@@ -1308,18 +1369,24 @@ private:
         Font value = makeFont(13, FontStyleBold);
 
         drawText(g, L"Codex Quota", RectF(rect.X + 18, rect.Y + 12, 170, 22), title, colorFromHex(35, 32, 43));
+        Color statusColor = metrics_.quota.available
+            ? colorFromHex(63, 119, 88)
+            : (metrics_.quota.localAuth ? colorFromHex(73, 90, 150) : colorFromHex(148, 70, 70));
         drawText(g, metrics_.quota.status, RectF(rect.X + rect.Width - 150, rect.Y + 13, 128, 20), label,
-                 metrics_.quota.available ? colorFromHex(63, 119, 88) : colorFromHex(148, 70, 70), StringAlignmentFar);
+                 statusColor, StringAlignmentFar);
 
-        drawQuotaLine(g, rect.X + 18, rect.Y + 40, L"5h", metrics_.quota.fiveHour, metrics_.quota.fiveHourReset, value);
-        drawQuotaLine(g, rect.X + 18, rect.Y + 62, L"7d", metrics_.quota.sevenDay, metrics_.quota.sevenDayReset, value);
+        drawQuotaLine(g, rect.X + 18, rect.Y + 40, metrics_.quota.firstLabel, metrics_.quota.fiveHour,
+                      metrics_.quota.fiveHourReset, value);
+        drawQuotaLine(g, rect.X + 18, rect.Y + 62, metrics_.quota.secondLabel, metrics_.quota.sevenDay,
+                      metrics_.quota.sevenDayReset, value);
     }
 
     void drawQuotaLine(Graphics& g, REAL x, REAL y, const std::wstring& window, const std::wstring& left,
                        const std::wstring& reset, Font& font) {
-        drawText(g, window, RectF(x, y, 28, 18), font, colorFromHex(65, 58, 74));
-        drawText(g, left, RectF(x + 38, y, 100, 18), font, colorFromHex(48, 44, 58));
-        drawText(g, L"reset " + reset, RectF(x + 145, y, 210, 18), font, colorFromHex(82, 74, 92));
+        drawText(g, window, RectF(x, y, 36, 18), font, colorFromHex(65, 58, 74));
+        drawText(g, left, RectF(x + 42, y, 100, 18), font, colorFromHex(48, 44, 58));
+        const std::wstring suffix = (window == L"5h" || window == L"7d") ? (L"reset " + reset) : reset;
+        drawText(g, suffix, RectF(x + 148, y, 207, 18), font, colorFromHex(82, 74, 92));
     }
 
     void drawTopAppsCard(Graphics& g, RectF rect) {
