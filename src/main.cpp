@@ -13,6 +13,7 @@
 #endif
 
 #include <windows.h>
+#include <windowsx.h>
 #include <gdiplus.h>
 #include <iphlpapi.h>
 #include <psapi.h>
@@ -36,8 +37,10 @@ namespace {
 
 constexpr UINT_PTR kRefreshTimer = 1001;
 constexpr UINT kTrayMessage = WM_APP + 42;
-constexpr wchar_t kClassName[] = L"ColorfulMonitorWindow";
-constexpr wchar_t kAppTitle[] = L"Colorful Monitor";
+constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
+constexpr wchar_t kAppTitle[] = L"MiniMonitor";
+constexpr int kPanelWidth = 430;
+constexpr int kPanelHeight = 720;
 constexpr int kHistorySize = 64;
 
 struct SampleHistory {
@@ -122,16 +125,17 @@ std::wstring formatPercent(double value) {
     return buffer;
 }
 
-Color colorFromHex(BYTE r, BYTE g, BYTE b, BYTE a = 255) {
-    return Color(a, r, g, b);
+std::wstring computerName() {
+    wchar_t buffer[MAX_COMPUTERNAME_LENGTH + 1]{};
+    DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
+    if (GetComputerNameW(buffer, &size)) {
+        return buffer;
+    }
+    return L"Windows PC";
 }
 
-RectF insetRect(RectF rect, REAL dx, REAL dy) {
-    rect.X += dx;
-    rect.Y += dy;
-    rect.Width -= dx * 2.0f;
-    rect.Height -= dy * 2.0f;
-    return rect;
+Color colorFromHex(BYTE r, BYTE g, BYTE b, BYTE a = 255) {
+    return Color(a, r, g, b);
 }
 
 std::unique_ptr<GraphicsPath> roundedRect(RectF rect, REAL radius) {
@@ -427,15 +431,22 @@ public:
             return false;
         }
 
+        RECT workArea{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+        const int availableHeight = static_cast<int>(workArea.bottom - workArea.top - 32);
+        const int panelHeight = std::min(kPanelHeight, std::max(560, availableHeight));
+        const int panelX = workArea.right - kPanelWidth - 16;
+        const int panelY = workArea.top + 16;
+
         hwnd_ = CreateWindowExW(
-            0,
+            WS_EX_TOOLWINDOW,
             kClassName,
             kAppTitle,
-            WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            1040,
-            720,
+            WS_POPUP,
+            panelX,
+            panelY,
+            kPanelWidth,
+            panelHeight,
             nullptr,
             nullptr,
             instance_,
@@ -445,6 +456,7 @@ public:
             return false;
         }
 
+        SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, kPanelWidth, panelHeight, 24, 24), TRUE);
         SetTimer(hwnd_, kRefreshTimer, 2000, nullptr);
         addTrayIcon();
         metrics_ = sampler_.collect();
@@ -460,6 +472,7 @@ private:
     HICON icon_ = nullptr;
     SystemSampler sampler_;
     Metrics metrics_;
+    std::wstring machineName_ = computerName();
     SampleHistory cpuHistory_;
     SampleHistory memoryHistory_;
     SampleHistory diskHistory_;
@@ -496,9 +509,18 @@ private:
         case WM_PAINT:
             paint();
             return 0;
+        case WM_NCHITTEST:
+            return hitTest(lParam);
+        case WM_LBUTTONUP:
+            handleClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            return 0;
         case WM_SIZE:
             if (wParam == SIZE_MINIMIZED) {
                 ShowWindow(hwnd_, SW_HIDE);
+            } else {
+                RECT client{};
+                GetClientRect(hwnd_, &client);
+                SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, client.right, client.bottom, 24, 24), TRUE);
             }
             return 0;
         case WM_COMMAND:
@@ -562,12 +584,39 @@ private:
             POINT point{};
             GetCursorPos(&point);
             HMENU menu = CreatePopupMenu();
-            AppendMenuW(menu, MF_STRING, 1, L"显示 Colorful Monitor");
+            AppendMenuW(menu, MF_STRING, 1, L"显示 MiniMonitor");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, MF_STRING, 2, L"退出");
             SetForegroundWindow(hwnd_);
             TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
+        }
+    }
+
+    LRESULT hitTest(LPARAM lParam) {
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        ScreenToClient(hwnd_, &point);
+        RECT client{};
+        GetClientRect(hwnd_, &client);
+        if (point.y >= 0 && point.y < 92 && point.x >= 0 && point.x < client.right) {
+            return HTCAPTION;
+        }
+        return HTCLIENT;
+    }
+
+    void handleClick(int x, int y) {
+        RECT client{};
+        GetClientRect(hwnd_, &client);
+        const int bottom = client.bottom - 42;
+        if (y < bottom) {
+            return;
+        }
+        if (x >= client.right - 62) {
+            DestroyWindow(hwnd_);
+        } else if (x >= client.right - 116) {
+            MessageBoxW(hwnd_, L"MiniMonitor\n2 秒刷新，托盘常驻。", L"MiniMonitor", MB_OK | MB_ICONINFORMATION);
+        } else if (x >= client.right - 170) {
+            ShowWindow(hwnd_, SW_HIDE);
         }
     }
 
@@ -619,72 +668,66 @@ private:
     void drawBackground(Graphics& g, int width, int height) {
         LinearGradientBrush bg(
             Rect(0, 0, width, height),
-            colorFromHex(12, 18, 30),
-            colorFromHex(20, 29, 46),
+            colorFromHex(202, 188, 211),
+            colorFromHex(232, 214, 222),
             LinearGradientModeForwardDiagonal);
         g.FillRectangle(&bg, 0, 0, width, height);
 
-        Pen cyan(Color(48, 91, 219, 204), 1.0f);
-        Pen violet(Color(34, 166, 128, 255), 1.0f);
-        Pen amber(Color(30, 244, 190, 102), 1.0f);
-        for (int i = 0; i < 5; ++i) {
-            const int offset = i * 84;
-            g.DrawLine(&cyan, width - 420 + offset, 0, width - 250 + offset, height);
-            g.DrawLine(&violet, 0, 130 + offset, width, 36 + offset);
-        }
-        g.DrawLine(&amber, 0, height - 86, width, height - 148);
+        SolidBrush washA(Color(58, 255, 255, 255));
+        SolidBrush washB(Color(42, 118, 92, 165));
+        SolidBrush washC(Color(36, 245, 184, 196));
+        g.FillEllipse(&washA, -60, -80, 250, 220);
+        g.FillEllipse(&washB, width - 150, 42, 210, 240);
+        g.FillEllipse(&washC, 96, height - 160, 260, 220);
     }
 
-    void drawHeader(Graphics& g, int width) {
-        Font title = makeFont(30, FontStyleBold);
-        Font subtitle = makeFont(13, FontStyleRegular);
-        Font badge = makeFont(12, FontStyleBold);
+    void drawHeader(Graphics& g, int) {
+        Font title = makeFont(22, FontStyleBold);
+        Font subtitle = makeFont(13, FontStyleBold);
 
-        drawText(g, L"Colorful Monitor", RectF(34, 26, 420, 40), title, colorFromHex(246, 248, 252));
-        drawText(g, L"Windows 轻量资源监控器", RectF(37, 67, 420, 24), subtitle, colorFromHex(154, 168, 190));
+        RectF iconRect(28, 24, 48, 48);
+        auto iconPath = roundedRect(iconRect, 12.0f);
+        LinearGradientBrush iconBrush(iconRect, colorFromHex(114, 148, 239), colorFromHex(169, 113, 220),
+                                      LinearGradientModeForwardDiagonal);
+        g.FillPath(&iconBrush, iconPath.get());
+        Pen iconPen(Color(205, 255, 255, 255), 2.0f);
+        g.DrawEllipse(&iconPen, iconRect.X + 12.0f, iconRect.Y + 12.0f, 24.0f, 24.0f);
+        g.DrawLine(&iconPen, iconRect.X + 24, iconRect.Y + 18, iconRect.X + 24, iconRect.Y + 31);
+        g.DrawLine(&iconPen, iconRect.X + 24, iconRect.Y + 31, iconRect.X + 32, iconRect.Y + 25);
 
-        RectF pill(width - 222.0f, 32.0f, 184.0f, 34.0f);
-        auto path = roundedRect(pill, 8.0f);
-        SolidBrush pillBrush(Color(72, 32, 43, 66));
-        Pen pillPen(Color(110, 118, 241, 213), 1.0f);
-        g.FillPath(&pillBrush, path.get());
-        g.DrawPath(&pillPen, path.get());
-        drawText(g, L"2 秒刷新  ·  托盘常驻", insetRect(pill, 14, 0), badge, colorFromHex(200, 250, 241),
-                 StringAlignmentCenter, StringAlignmentCenter);
+        drawText(g, L"MiniMonitor", RectF(90, 24, 240, 28), title, colorFromHex(54, 48, 65));
+        drawText(g, machineName_, RectF(91, 53, 260, 22), subtitle, colorFromHex(74, 67, 82));
     }
 
     void drawCards(Graphics& g, int width, int height) {
-        const REAL margin = 32.0f;
-        const REAL gap = 16.0f;
-        const REAL top = 112.0f;
-        const REAL cardW = (width - margin * 2.0f - gap * 3.0f) / 4.0f;
-        const REAL cardH = 182.0f;
+        const REAL margin = 18.0f;
+        const REAL gap = 12.0f;
+        const REAL top = 96.0f;
+        const REAL halfW = (width - margin * 2.0f - gap) / 2.0f;
 
-        drawMetricCard(g, RectF(margin, top, cardW, cardH), L"CPU", formatPercent(metrics_.cpu),
-                       L"系统处理器负载", cpuHistory_, colorFromHex(101, 225, 184));
-        drawMetricCard(g, RectF(margin + (cardW + gap), top, cardW, cardH), L"Memory", formatPercent(metrics_.memory),
-                       formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
-                           formatBytes(static_cast<double>(metrics_.memoryTotal)),
-                       memoryHistory_, colorFromHex(134, 165, 255));
-        drawMetricCard(g, RectF(margin + (cardW + gap) * 2, top, cardW, cardH), L"Disk C:", formatPercent(metrics_.disk),
-                       formatBytes(static_cast<double>(metrics_.diskUsed)) + L" / " +
-                           formatBytes(static_cast<double>(metrics_.diskTotal)),
-                       diskHistory_, colorFromHex(249, 193, 104));
-        drawMetricCard(g, RectF(margin + (cardW + gap) * 3, top, cardW, cardH), L"Network", formatPercent(metrics_.network),
-                       L"↓ " + formatSpeed(metrics_.netDown) + L"   ↑ " + formatSpeed(metrics_.netUp),
-                       networkHistory_, colorFromHex(244, 132, 161));
+        drawMetricCard(g, RectF(margin, top, halfW, 154), L"CPU", formatPercent(metrics_.cpu),
+                       L"系统负载", cpuHistory_, colorFromHex(83, 118, 224));
+        drawGpuCard(g, RectF(margin + halfW + gap, top, halfW, 154));
+        drawMemoryCard(g, RectF(margin, top + 166, width - margin * 2.0f, 126));
 
-        const REAL lowerTop = top + cardH + 18.0f;
-        const REAL leftW = (width - margin * 2.0f - gap) * 0.58f;
-        const REAL rightW = width - margin * 2.0f - gap - leftW;
-        drawProcessPanel(g, RectF(margin, lowerTop, leftW, height - lowerTop - 32.0f));
-        drawInfoPanel(g, RectF(margin + leftW + gap, lowerTop, rightW, height - lowerTop - 32.0f));
+        const REAL rowY = top + 304;
+        drawSmallStatCard(g, RectF(margin, rowY, halfW, 112), L"Network",
+                          L"↓ " + formatSpeed(metrics_.netDown),
+                          L"↑ " + formatSpeed(metrics_.netUp),
+                          colorFromHex(74, 147, 224));
+        drawSmallStatCard(g, RectF(margin + halfW + gap, rowY, halfW, 112), L"Disk",
+                          formatBytes(static_cast<double>(metrics_.diskUsed)) + L" / " +
+                              formatBytes(static_cast<double>(metrics_.diskTotal)),
+                          L"Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A"),
+                          colorFromHex(248, 188, 77));
+        drawInfoStrip(g, RectF(margin, rowY + 124, width - margin * 2.0f, 84));
+        drawFooter(g, width, height);
     }
 
     void drawPanel(Graphics& g, RectF rect) {
         auto path = roundedRect(rect, 8.0f);
-        SolidBrush fill(Color(176, 20, 29, 45));
-        Pen border(Color(66, 255, 255, 255), 1.0f);
+        SolidBrush fill(Color(164, 255, 246, 252));
+        Pen border(Color(110, 255, 255, 255), 1.0f);
         g.FillPath(&fill, path.get());
         g.DrawPath(&border, path.get());
     }
@@ -693,25 +736,136 @@ private:
                         const std::wstring& subtitle, const SampleHistory& history, Color accent) {
         drawPanel(g, rect);
 
-        Font label = makeFont(13, FontStyleBold);
-        Font valueFont = makeFont(38, FontStyleBold);
-        Font small = makeFont(12, FontStyleRegular);
+        Font label = makeFont(18, FontStyleBold);
+        Font valueFont = makeFont(28, FontStyleBold);
+        Font small = makeFont(12, FontStyleBold);
 
-        drawText(g, title, RectF(rect.X + 18, rect.Y + 16, rect.Width - 36, 22), label, colorFromHex(176, 188, 208));
-        drawText(g, value, RectF(rect.X + 17, rect.Y + 42, rect.Width - 34, 48), valueFont, colorFromHex(248, 251, 255));
-        drawText(g, subtitle, RectF(rect.X + 19, rect.Y + 94, rect.Width - 38, 20), small, colorFromHex(139, 154, 178));
+        drawText(g, title, RectF(rect.X + 18, rect.Y + 18, rect.Width - 116, 24), label, colorFromHex(61, 54, 68));
+        drawText(g, value, RectF(rect.X + rect.Width - 116, rect.Y + 15, 98, 38), valueFont, colorFromHex(54, 48, 62),
+                 StringAlignmentFar);
+        drawText(g, subtitle, RectF(rect.X + 18, rect.Y + 47, rect.Width - 36, 20), small, colorFromHex(92, 82, 100));
+        drawSparkline(g, RectF(rect.X + 18, rect.Y + 78, rect.Width - 36, 46), history, accent);
+        drawLegend(g, rect.X + 18, rect.Y + rect.Height - 24, L"2s refresh", accent);
+    }
 
-        RectF bar(rect.X + 18, rect.Y + rect.Height - 48, rect.Width - 36, 8);
-        auto barPath = roundedRect(bar, 4.0f);
-        SolidBrush barBg(Color(90, 255, 255, 255));
-        g.FillPath(&barBg, barPath.get());
-        RectF fillRect = bar;
-        fillRect.Width *= static_cast<REAL>(history.values.empty() ? 0.0 : history.values.back());
-        auto fillPath = roundedRect(fillRect, 4.0f);
-        SolidBrush fill(accent);
-        g.FillPath(&fill, fillPath.get());
+    void drawGpuCard(Graphics& g, RectF rect) {
+        drawPanel(g, rect);
+        Font label = makeFont(18, FontStyleBold);
+        Font valueFont = makeFont(26, FontStyleBold);
+        Font small = makeFont(12, FontStyleBold);
 
-        drawSparkline(g, RectF(rect.X + 18, rect.Y + 124, rect.Width - 36, 38), history, accent);
+        drawText(g, L"GPU", RectF(rect.X + 18, rect.Y + 18, rect.Width - 36, 24), label, colorFromHex(61, 54, 68));
+        drawText(g, L"N/A", RectF(rect.X + rect.Width - 92, rect.Y + 16, 74, 34), valueFont, colorFromHex(54, 48, 62),
+                 StringAlignmentFar);
+        drawText(g, metrics_.gpuName, RectF(rect.X + 18, rect.Y + 52, rect.Width - 36, 36), small, colorFromHex(92, 82, 100));
+
+        Pen line(Color(130, 83, 118, 224), 2.0f);
+        for (int i = 0; i < 5; ++i) {
+            const REAL y = rect.Y + 102 + i * 5.0f;
+            g.DrawLine(&line, rect.X + 18 + i * 22.0f, y, rect.X + 34 + i * 22.0f, y - 8.0f);
+        }
+        drawLegend(g, rect.X + 18, rect.Y + rect.Height - 24, L"display adapter", colorFromHex(83, 118, 224));
+    }
+
+    void drawMemoryCard(Graphics& g, RectF rect) {
+        drawPanel(g, rect);
+        Font label = makeFont(18, FontStyleBold);
+        Font valueFont = makeFont(27, FontStyleBold);
+        Font small = makeFont(12, FontStyleBold);
+
+        drawText(g, L"Memory", RectF(rect.X + 20, rect.Y + 16, 170, 26), label, colorFromHex(61, 54, 68));
+        drawText(g, formatPercent(metrics_.memory), RectF(rect.X + rect.Width - 118, rect.Y + 12, 96, 36), valueFont,
+                 colorFromHex(54, 48, 62), StringAlignmentFar);
+
+        RectF bar(rect.X + 20, rect.Y + 54, rect.Width - 40, 18);
+        auto bgPath = roundedRect(bar, 6.0f);
+        SolidBrush bg(Color(120, 226, 218, 230));
+        g.FillPath(&bg, bgPath.get());
+        RectF used = bar;
+        used.Width *= static_cast<REAL>(metrics_.memory);
+        auto usedPath = roundedRect(used, 6.0f);
+        SolidBrush usedBrush(colorFromHex(99, 118, 225));
+        g.FillPath(&usedBrush, usedPath.get());
+
+        drawText(g,
+                 formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
+                     formatBytes(static_cast<double>(metrics_.memoryTotal)),
+                 RectF(rect.X + 20, rect.Y + 84, 170, 22), small, colorFromHex(78, 70, 88));
+        drawSparkline(g, RectF(rect.X + rect.Width - 130, rect.Y + 82, 108, 26), memoryHistory_, colorFromHex(223, 157, 67));
+    }
+
+    void drawSmallStatCard(Graphics& g, RectF rect, const std::wstring& title, const std::wstring& primary,
+                           const std::wstring& secondary, Color accent) {
+        drawPanel(g, rect);
+        Font label = makeFont(17, FontStyleBold);
+        Font value = makeFont(14, FontStyleBold);
+
+        drawText(g, title, RectF(rect.X + 18, rect.Y + 16, rect.Width - 36, 22), label, colorFromHex(61, 54, 68));
+        drawLegend(g, rect.X + 18, rect.Y + 51, primary, accent);
+        drawLegend(g, rect.X + 18, rect.Y + 78, secondary, colorFromHex(87, 169, 130));
+
+        RectF mini(rect.X + rect.Width - 60, rect.Y + 20, 38, 38);
+        auto path = roundedRect(mini, 8.0f);
+        SolidBrush brush(Color(54, accent.GetR(), accent.GetG(), accent.GetB()));
+        g.FillPath(&brush, path.get());
+        drawText(g, L"·", RectF(mini.X, mini.Y - 7, mini.Width, mini.Height), value, accent, StringAlignmentCenter,
+                 StringAlignmentCenter);
+    }
+
+    void drawInfoStrip(Graphics& g, RectF rect) {
+        drawPanel(g, rect);
+        Font label = makeFont(14, FontStyleBold);
+        Font value = makeFont(13, FontStyleBold);
+
+        drawText(g, L"I/O", RectF(rect.X + 18, rect.Y + 14, 60, 20), label, colorFromHex(61, 54, 68));
+        drawText(g, L"Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"),
+                 RectF(rect.X + 18, rect.Y + 40, 150, 22), value, colorFromHex(78, 70, 88));
+        drawText(g, L"Disk " + formatPercent(metrics_.disk), RectF(rect.X + rect.Width - 118, rect.Y + 14, 96, 22), value,
+                 colorFromHex(78, 70, 88), StringAlignmentFar);
+        drawText(g, L"Net " + formatPercent(metrics_.network), RectF(rect.X + rect.Width - 118, rect.Y + 40, 96, 22), value,
+                 colorFromHex(78, 70, 88), StringAlignmentFar);
+    }
+
+    void drawFooter(Graphics& g, int width, int height) {
+        const REAL y = static_cast<REAL>(height - 48);
+        for (int i = 0; i < 3; ++i) {
+            RectF rect(width - 166.0f + i * 54.0f, y, 38, 38);
+            auto path = roundedRect(rect, 8.0f);
+            SolidBrush bg(Color(60, 255, 255, 255));
+            g.FillPath(&bg, path.get());
+            Pen pen(colorFromHex(66, 56, 72), 2.0f);
+            pen.SetStartCap(LineCapRound);
+            pen.SetEndCap(LineCapRound);
+            const REAL cx = rect.X + rect.Width / 2.0f;
+            const REAL cy = rect.Y + rect.Height / 2.0f;
+            if (i == 0) {
+                g.DrawLine(&pen, cx - 8, cy, cx - 3, cy);
+                g.DrawLine(&pen, cx - 3, cy, cx, cy - 7);
+                g.DrawLine(&pen, cx, cy - 7, cx + 4, cy + 7);
+                g.DrawLine(&pen, cx + 4, cy + 7, cx + 9, cy);
+            } else if (i == 1) {
+                g.DrawEllipse(&pen, cx - 7.0f, cy - 7.0f, 14.0f, 14.0f);
+                g.DrawEllipse(&pen, cx - 2.0f, cy - 2.0f, 4.0f, 4.0f);
+                for (int t = 0; t < 6; ++t) {
+                    const REAL angle = static_cast<REAL>(t) * 3.14159f / 3.0f;
+                    const REAL x1 = cx + std::cos(angle) * 10.0f;
+                    const REAL y1 = cy + std::sin(angle) * 10.0f;
+                    const REAL x2 = cx + std::cos(angle) * 12.0f;
+                    const REAL y2 = cy + std::sin(angle) * 12.0f;
+                    g.DrawLine(&pen, x1, y1, x2, y2);
+                }
+            } else {
+                g.DrawArc(&pen, cx - 9.0f, cy - 6.0f, 18.0f, 18.0f, 35.0f, 290.0f);
+                g.DrawLine(&pen, cx, cy - 12.0f, cx, cy - 1.0f);
+            }
+        }
+    }
+
+    void drawLegend(Graphics& g, REAL x, REAL y, const std::wstring& text, Color accent) {
+        SolidBrush dot(accent);
+        g.FillEllipse(&dot, x, y + 4.0f, 8.0f, 8.0f);
+        Font font = makeFont(12, FontStyleBold);
+        drawText(g, text, RectF(x + 14, y, 150, 18), font, colorFromHex(76, 68, 86));
     }
 
     void drawSparkline(Graphics& g, RectF rect, const SampleHistory& history, Color accent) {

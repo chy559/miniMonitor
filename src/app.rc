@@ -13,12 +13,12 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName", "Colorful Monitor"
-            VALUE "FileDescription", "Lightweight Windows resource monitor"
+            VALUE "CompanyName", "MiniMonitor"
+            VALUE "FileDescription", "Compact Windows sidebar resource monitor"
             VALUE "FileVersion", "1.0.0"
-            VALUE "InternalName", "ColorfulMonitor"
-            VALUE "OriginalFilename", "ColorfulMonitor.exe"
-            VALUE "ProductName", "Colorful Monitor"
+            VALUE "InternalName", "MiniMonitor"
+            VALUE "OriginalFilename", "MiniMonitor.exe"
+            VALUE "ProductName", "MiniMonitor"
             VALUE "ProductVersion", "1.0.0"
         END
     END

@@ -4,7 +4,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BuildDir = Join-Path $Root "build"
 $DistDir = Join-Path $Root "dist"
 $ResFile = Join-Path $BuildDir "app.res"
-$ExeFile = Join-Path $DistDir "ColorfulMonitor.exe"
+$ExeFile = Join-Path $DistDir "MiniMonitor.exe"
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
