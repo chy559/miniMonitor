@@ -1,0 +1,8 @@
+build/
+dist/
+*.o
+*.res
+*.exe
+*.log
+.vs/
+.vscode/
