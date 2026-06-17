@@ -134,6 +134,45 @@ std::wstring computerName() {
     return L"Windows PC";
 }
 
+void enableDpiAwareness() {
+    HMODULE user32 = LoadLibraryW(L"user32.dll");
+    if (!user32) {
+        return;
+    }
+
+    using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(HANDLE);
+    auto dpiContextProc = GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+    SetProcessDpiAwarenessContextFn setDpiContext = nullptr;
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
+    setDpiContext = reinterpret_cast<SetProcessDpiAwarenessContextFn>(dpiContextProc);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    if (setDpiContext && setDpiContext(reinterpret_cast<HANDLE>(-4))) {
+        FreeLibrary(user32);
+        return;
+    }
+
+    using SetProcessDPIAwareFn = BOOL(WINAPI*)();
+    auto dpiAwareProc = GetProcAddress(user32, "SetProcessDPIAware");
+    SetProcessDPIAwareFn setDpiAware = nullptr;
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
+    setDpiAware = reinterpret_cast<SetProcessDPIAwareFn>(dpiAwareProc);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    if (setDpiAware) {
+        setDpiAware();
+    }
+    FreeLibrary(user32);
+}
+
 Color colorFromHex(BYTE r, BYTE g, BYTE b, BYTE a = 255) {
     return Color(a, r, g, b);
 }
@@ -668,14 +707,14 @@ private:
     void drawBackground(Graphics& g, int width, int height) {
         LinearGradientBrush bg(
             Rect(0, 0, width, height),
-            colorFromHex(202, 188, 211),
-            colorFromHex(232, 214, 222),
+            colorFromHex(236, 231, 240),
+            colorFromHex(224, 216, 229),
             LinearGradientModeForwardDiagonal);
         g.FillRectangle(&bg, 0, 0, width, height);
 
-        SolidBrush washA(Color(58, 255, 255, 255));
-        SolidBrush washB(Color(42, 118, 92, 165));
-        SolidBrush washC(Color(36, 245, 184, 196));
+        SolidBrush washA(Color(22, 255, 255, 255));
+        SolidBrush washB(Color(18, 118, 92, 165));
+        SolidBrush washC(Color(16, 245, 184, 196));
         g.FillEllipse(&washA, -60, -80, 250, 220);
         g.FillEllipse(&washB, width - 150, 42, 210, 240);
         g.FillEllipse(&washC, 96, height - 160, 260, 220);
@@ -695,8 +734,8 @@ private:
         g.DrawLine(&iconPen, iconRect.X + 24, iconRect.Y + 18, iconRect.X + 24, iconRect.Y + 31);
         g.DrawLine(&iconPen, iconRect.X + 24, iconRect.Y + 31, iconRect.X + 32, iconRect.Y + 25);
 
-        drawText(g, L"MiniMonitor", RectF(90, 24, 240, 28), title, colorFromHex(54, 48, 65));
-        drawText(g, machineName_, RectF(91, 53, 260, 22), subtitle, colorFromHex(74, 67, 82));
+        drawText(g, L"MiniMonitor", RectF(90, 24, 240, 28), title, colorFromHex(36, 34, 45));
+        drawText(g, machineName_, RectF(91, 53, 260, 22), subtitle, colorFromHex(58, 53, 66));
     }
 
     void drawCards(Graphics& g, int width, int height) {
@@ -726,8 +765,8 @@ private:
 
     void drawPanel(Graphics& g, RectF rect) {
         auto path = roundedRect(rect, 8.0f);
-        SolidBrush fill(Color(164, 255, 246, 252));
-        Pen border(Color(110, 255, 255, 255), 1.0f);
+        SolidBrush fill(Color(242, 250, 246, 252));
+        Pen border(Color(170, 186, 174, 194), 1.0f);
         g.FillPath(&fill, path.get());
         g.DrawPath(&border, path.get());
     }
@@ -740,10 +779,10 @@ private:
         Font valueFont = makeFont(28, FontStyleBold);
         Font small = makeFont(12, FontStyleBold);
 
-        drawText(g, title, RectF(rect.X + 18, rect.Y + 18, rect.Width - 116, 24), label, colorFromHex(61, 54, 68));
-        drawText(g, value, RectF(rect.X + rect.Width - 116, rect.Y + 15, 98, 38), valueFont, colorFromHex(54, 48, 62),
+        drawText(g, title, RectF(rect.X + 18, rect.Y + 18, rect.Width - 116, 24), label, colorFromHex(35, 32, 43));
+        drawText(g, value, RectF(rect.X + rect.Width - 116, rect.Y + 15, 98, 38), valueFont, colorFromHex(31, 29, 39),
                  StringAlignmentFar);
-        drawText(g, subtitle, RectF(rect.X + 18, rect.Y + 47, rect.Width - 36, 20), small, colorFromHex(92, 82, 100));
+        drawText(g, subtitle, RectF(rect.X + 18, rect.Y + 47, rect.Width - 36, 20), small, colorFromHex(65, 58, 74));
         drawSparkline(g, RectF(rect.X + 18, rect.Y + 78, rect.Width - 36, 46), history, accent);
         drawLegend(g, rect.X + 18, rect.Y + rect.Height - 24, L"2s refresh", accent);
     }
@@ -754,10 +793,10 @@ private:
         Font valueFont = makeFont(26, FontStyleBold);
         Font small = makeFont(12, FontStyleBold);
 
-        drawText(g, L"GPU", RectF(rect.X + 18, rect.Y + 18, rect.Width - 36, 24), label, colorFromHex(61, 54, 68));
-        drawText(g, L"N/A", RectF(rect.X + rect.Width - 92, rect.Y + 16, 74, 34), valueFont, colorFromHex(54, 48, 62),
+        drawText(g, L"GPU", RectF(rect.X + 18, rect.Y + 18, rect.Width - 36, 24), label, colorFromHex(35, 32, 43));
+        drawText(g, L"N/A", RectF(rect.X + rect.Width - 92, rect.Y + 16, 74, 34), valueFont, colorFromHex(31, 29, 39),
                  StringAlignmentFar);
-        drawText(g, metrics_.gpuName, RectF(rect.X + 18, rect.Y + 52, rect.Width - 36, 36), small, colorFromHex(92, 82, 100));
+        drawText(g, metrics_.gpuName, RectF(rect.X + 18, rect.Y + 52, rect.Width - 36, 36), small, colorFromHex(65, 58, 74));
 
         Pen line(Color(130, 83, 118, 224), 2.0f);
         for (int i = 0; i < 5; ++i) {
@@ -773,13 +812,13 @@ private:
         Font valueFont = makeFont(27, FontStyleBold);
         Font small = makeFont(12, FontStyleBold);
 
-        drawText(g, L"Memory", RectF(rect.X + 20, rect.Y + 16, 170, 26), label, colorFromHex(61, 54, 68));
+        drawText(g, L"Memory", RectF(rect.X + 20, rect.Y + 16, 170, 26), label, colorFromHex(35, 32, 43));
         drawText(g, formatPercent(metrics_.memory), RectF(rect.X + rect.Width - 118, rect.Y + 12, 96, 36), valueFont,
-                 colorFromHex(54, 48, 62), StringAlignmentFar);
+                 colorFromHex(31, 29, 39), StringAlignmentFar);
 
         RectF bar(rect.X + 20, rect.Y + 54, rect.Width - 40, 18);
         auto bgPath = roundedRect(bar, 6.0f);
-        SolidBrush bg(Color(120, 226, 218, 230));
+        SolidBrush bg(Color(180, 226, 218, 230));
         g.FillPath(&bg, bgPath.get());
         RectF used = bar;
         used.Width *= static_cast<REAL>(metrics_.memory);
@@ -790,7 +829,7 @@ private:
         drawText(g,
                  formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
                      formatBytes(static_cast<double>(metrics_.memoryTotal)),
-                 RectF(rect.X + 20, rect.Y + 84, 170, 22), small, colorFromHex(78, 70, 88));
+                 RectF(rect.X + 20, rect.Y + 84, 170, 22), small, colorFromHex(55, 50, 64));
         drawSparkline(g, RectF(rect.X + rect.Width - 130, rect.Y + 82, 108, 26), memoryHistory_, colorFromHex(223, 157, 67));
     }
 
@@ -800,13 +839,13 @@ private:
         Font label = makeFont(17, FontStyleBold);
         Font value = makeFont(14, FontStyleBold);
 
-        drawText(g, title, RectF(rect.X + 18, rect.Y + 16, rect.Width - 36, 22), label, colorFromHex(61, 54, 68));
+        drawText(g, title, RectF(rect.X + 18, rect.Y + 16, rect.Width - 36, 22), label, colorFromHex(35, 32, 43));
         drawLegend(g, rect.X + 18, rect.Y + 51, primary, accent);
         drawLegend(g, rect.X + 18, rect.Y + 78, secondary, colorFromHex(87, 169, 130));
 
         RectF mini(rect.X + rect.Width - 60, rect.Y + 20, 38, 38);
         auto path = roundedRect(mini, 8.0f);
-        SolidBrush brush(Color(54, accent.GetR(), accent.GetG(), accent.GetB()));
+        SolidBrush brush(Color(82, accent.GetR(), accent.GetG(), accent.GetB()));
         g.FillPath(&brush, path.get());
         drawText(g, L"·", RectF(mini.X, mini.Y - 7, mini.Width, mini.Height), value, accent, StringAlignmentCenter,
                  StringAlignmentCenter);
@@ -817,13 +856,13 @@ private:
         Font label = makeFont(14, FontStyleBold);
         Font value = makeFont(13, FontStyleBold);
 
-        drawText(g, L"I/O", RectF(rect.X + 18, rect.Y + 14, 60, 20), label, colorFromHex(61, 54, 68));
+        drawText(g, L"I/O", RectF(rect.X + 18, rect.Y + 14, 60, 20), label, colorFromHex(35, 32, 43));
         drawText(g, L"Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"),
-                 RectF(rect.X + 18, rect.Y + 40, 150, 22), value, colorFromHex(78, 70, 88));
+                 RectF(rect.X + 18, rect.Y + 40, 150, 22), value, colorFromHex(55, 50, 64));
         drawText(g, L"Disk " + formatPercent(metrics_.disk), RectF(rect.X + rect.Width - 118, rect.Y + 14, 96, 22), value,
-                 colorFromHex(78, 70, 88), StringAlignmentFar);
+                 colorFromHex(55, 50, 64), StringAlignmentFar);
         drawText(g, L"Net " + formatPercent(metrics_.network), RectF(rect.X + rect.Width - 118, rect.Y + 40, 96, 22), value,
-                 colorFromHex(78, 70, 88), StringAlignmentFar);
+                 colorFromHex(55, 50, 64), StringAlignmentFar);
     }
 
     void drawFooter(Graphics& g, int width, int height) {
@@ -831,7 +870,7 @@ private:
         for (int i = 0; i < 3; ++i) {
             RectF rect(width - 166.0f + i * 54.0f, y, 38, 38);
             auto path = roundedRect(rect, 8.0f);
-            SolidBrush bg(Color(60, 255, 255, 255));
+            SolidBrush bg(Color(182, 255, 250, 255));
             g.FillPath(&bg, path.get());
             Pen pen(colorFromHex(66, 56, 72), 2.0f);
             pen.SetStartCap(LineCapRound);
@@ -865,11 +904,11 @@ private:
         SolidBrush dot(accent);
         g.FillEllipse(&dot, x, y + 4.0f, 8.0f, 8.0f);
         Font font = makeFont(12, FontStyleBold);
-        drawText(g, text, RectF(x + 14, y, 150, 18), font, colorFromHex(76, 68, 86));
+        drawText(g, text, RectF(x + 14, y, 150, 18), font, colorFromHex(48, 44, 58));
     }
 
     void drawSparkline(Graphics& g, RectF rect, const SampleHistory& history, Color accent) {
-        Pen grid(Color(30, 255, 255, 255), 1.0f);
+        Pen grid(Color(70, 186, 174, 194), 1.0f);
         g.DrawLine(&grid, rect.X, rect.Y + rect.Height, rect.X + rect.Width, rect.Y + rect.Height);
 
         if (history.values.size() < 2) {
@@ -903,7 +942,7 @@ private:
         fillPath.AddLine(rect.X + rect.Width, rect.Y + rect.Height, rect.X, rect.Y + rect.Height);
         fillPath.CloseFigure();
 
-        SolidBrush area(Color(38, accent.GetR(), accent.GetG(), accent.GetB()));
+        SolidBrush area(Color(28, accent.GetR(), accent.GetG(), accent.GetB()));
         Pen pen(accent, 2.0f);
         g.FillPath(&area, &fillPath);
         g.DrawPath(&pen, &linePath);
@@ -977,6 +1016,8 @@ private:
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+    enableDpiAwareness();
+
     GdiplusStartupInput gdiplusStartupInput;
     ULONG_PTR gdiplusToken = 0;
     if (GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr) != Ok) {
