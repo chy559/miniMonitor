@@ -84,6 +84,7 @@ struct CodexQuota {
     std::wstring secondUsage = L"N/A";
     double firstProgress = 0.0;
     double secondProgress = 0.0;
+    std::wstring lastUpdated = L"Not updated";
     ULONGLONG lastCheckedTick = 0;
 };
 
@@ -384,6 +385,18 @@ std::wstring formatResetDetail(double value) {
     swprintf(dateBuffer, 32, L"%02d/%02d %02d:%02d", resetLocal.tm_mon + 1, resetLocal.tm_mday,
              resetLocal.tm_hour, resetLocal.tm_min);
     return remaining + L" (" + dateBuffer + L")";
+}
+
+std::wstring formatCurrentClock() {
+    std::time_t nowTime = std::time(nullptr);
+    std::tm nowLocal{};
+    if (localtime_s(&nowLocal, &nowTime) != 0) {
+        return L"Updated";
+    }
+
+    wchar_t buffer[32]{};
+    swprintf(buffer, 32, L"Updated %02d:%02d:%02d", nowLocal.tm_hour, nowLocal.tm_min, nowLocal.tm_sec);
+    return buffer;
 }
 
 std::wstring quotaWindowLabel(double seconds) {
@@ -893,12 +906,12 @@ private:
             return;
         }
 
-        cachedQuota_ = fetchCodexQuota();
+        cachedQuota_ = fetchCodexQuota(forceRefresh);
         cachedQuota_.lastCheckedTick = now;
         metrics.quota = cachedQuota_;
     }
 
-    CodexQuota fetchCodexQuota() {
+    CodexQuota fetchCodexQuota(bool forceRefresh) {
         CodexQuota quota;
         quota.checked = true;
         quota.status = L"Auth not found";
@@ -928,10 +941,11 @@ private:
         };
         for (const auto& path : paths) {
             DWORD statusCode = 0;
-            std::string body = httpGetChatGpt(path, accessToken, accountId, statusCode);
+            std::string body = httpGetChatGpt(path, accessToken, accountId, forceRefresh, statusCode);
             if (statusCode >= 200 && statusCode < 300 && !body.empty()) {
                 parseQuotaBody(body, quota);
                 if (quota.available) {
+                    quota.lastUpdated = formatCurrentClock();
                     return quota;
                 }
                 quota.status = L"Quota unreadable";
@@ -949,7 +963,7 @@ private:
     }
 
     std::string httpGetChatGpt(const std::wstring& path, const std::string& accessToken,
-                               const std::string& accountId, DWORD& statusCode) {
+                               const std::string& accountId, bool forceRefresh, DWORD& statusCode) {
         statusCode = 0;
         std::string response;
 
@@ -966,7 +980,14 @@ private:
             return response;
         }
 
-        HINTERNET request = WinHttpOpenRequest(connect, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+        std::wstring requestPath = path;
+        if (forceRefresh) {
+            requestPath += (requestPath.find(L'?') == std::wstring::npos ? L"?" : L"&");
+            requestPath += L"cache_sentinel=" + std::to_wstring(GetTickCount64());
+            requestPath += L"&_=" + std::to_wstring(static_cast<unsigned long long>(std::time(nullptr)));
+        }
+
+        HINTERNET request = WinHttpOpenRequest(connect, L"GET", requestPath.c_str(), nullptr, WINHTTP_NO_REFERER,
                                                WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
         if (!request) {
             WinHttpCloseHandle(connect);
@@ -976,6 +997,8 @@ private:
 
         std::string authHeader = "Authorization: Bearer " + accessToken +
                                  "\r\nAccept: application/json"
+                                 "\r\nCache-Control: no-cache, no-store, max-age=0"
+                                 "\r\nPragma: no-cache"
                                  "\r\nOAI-Product-Sku: CODEX"
                                  "\r\nOAI-Language: en"
                                  "\r\noriginator: Codex Desktop";
@@ -1363,6 +1386,7 @@ private:
         metrics_.quota.secondUsage = L"...";
         metrics_.quota.firstProgress = 0.0;
         metrics_.quota.secondProgress = 0.0;
+        metrics_.quota.lastUpdated = L"Updating...";
         InvalidateRect(hwnd_, nullptr, FALSE);
         UpdateWindow(hwnd_);
 
@@ -1556,6 +1580,9 @@ private:
                       metrics_.quota.firstUsage, metrics_.quota.firstProgress, firstDetail);
         drawQuotaLine(g, RectF(rect.X + 18, rect.Y + 72, rect.Width - 36, 48), true, metrics_.quota.secondLabel,
                       metrics_.quota.secondUsage, metrics_.quota.secondProgress, secondDetail);
+        Font stamp = makeFont(11, FontStyleRegular);
+        drawText(g, metrics_.quota.lastUpdated, RectF(rect.X + 18, rect.Y + 134, rect.Width - 152, 18), stamp,
+                 colorFromHex(91, 101, 119), StringAlignmentFar);
         drawQuotaRefreshButton(g, quotaRefreshButtonRect(width));
     }
 
