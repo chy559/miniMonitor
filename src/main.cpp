@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cwctype>
+#include <ctime>
 #include <deque>
 #include <map>
 #include <memory>
@@ -45,7 +46,7 @@ constexpr UINT kTrayMessage = WM_APP + 42;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
 constexpr int kPanelWidth = 430;
-constexpr int kPanelHeight = 720;
+constexpr int kPanelHeight = 780;
 constexpr int kHistorySize = 64;
 
 struct SampleHistory {
@@ -76,10 +77,26 @@ struct CodexQuota {
     std::wstring firstLabel = L"5h";
     std::wstring fiveHour = L"N/A";
     std::wstring fiveHourReset = L"N/A";
-    std::wstring secondLabel = L"7d";
+    std::wstring secondLabel = L"Weekly";
     std::wstring sevenDay = L"N/A";
     std::wstring sevenDayReset = L"N/A";
+    std::wstring firstUsage = L"N/A";
+    std::wstring secondUsage = L"N/A";
+    double firstProgress = 0.0;
+    double secondProgress = 0.0;
     ULONGLONG lastCheckedTick = 0;
+};
+
+struct QuotaWindow {
+    bool available = false;
+    double usedPercent = 0.0;
+    double windowSeconds = 0.0;
+    double resetAt = 0.0;
+    std::wstring label = L"--";
+    std::wstring remaining = L"N/A";
+    std::wstring reset = L"N/A";
+    std::wstring usage = L"N/A";
+    double progress = 0.0;
 };
 
 struct Metrics {
@@ -242,48 +259,150 @@ bool extractNumberAfter(const std::string& json, size_t start, const std::vector
     return end && end != json.c_str() + begin;
 }
 
-std::wstring extractStringAfter(const std::string& json, size_t start, const std::vector<std::string>& keys) {
-    size_t best = std::string::npos;
-    std::string bestKey;
-    for (const auto& key : keys) {
-        size_t pos = json.find("\"" + key + "\"", start);
-        if (pos != std::string::npos && (best == std::string::npos || pos < best)) {
-            best = pos;
-            bestKey = key;
+size_t findJsonCloser(const std::string& json, size_t openPos, char openChar, char closeChar) {
+    if (openPos >= json.size() || json[openPos] != openChar) {
+        return std::string::npos;
+    }
+
+    int depth = 0;
+    bool inString = false;
+    bool escape = false;
+    for (size_t i = openPos; i < json.size(); ++i) {
+        const char ch = json[i];
+        if (inString) {
+            if (escape) {
+                escape = false;
+            } else if (ch == '\\') {
+                escape = true;
+            } else if (ch == '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (ch == '"') {
+            inString = true;
+        } else if (ch == openChar) {
+            ++depth;
+        } else if (ch == closeChar) {
+            --depth;
+            if (depth == 0) {
+                return i;
+            }
         }
     }
-    if (best == std::string::npos || best > start + 900) {
-        return L"N/A";
-    }
-    std::string value = extractJsonString(json.substr(best), bestKey);
-    return value.empty() ? L"N/A" : utf8ToWide(value);
+    return std::string::npos;
 }
 
-std::wstring compactIsoTime(const std::string& value) {
-    if (value.empty()) {
-        return L"N/A";
+std::string extractJsonObjectForKey(const std::string& json, const std::string& key) {
+    const std::string needle = "\"" + key + "\"";
+    size_t keyPos = json.find(needle);
+    if (keyPos == std::string::npos) {
+        return "";
     }
-    std::string compact = value;
-    size_t dot = compact.find('.');
-    if (dot != std::string::npos) {
-        compact.erase(dot);
+    size_t colon = json.find(':', keyPos + needle.size());
+    if (colon == std::string::npos) {
+        return "";
     }
-    if (!compact.empty() && compact.back() == 'Z') {
-        compact.pop_back();
+    size_t open = json.find('{', colon + 1);
+    if (open == std::string::npos) {
+        return "";
     }
-    std::replace(compact.begin(), compact.end(), 'T', ' ');
-    if (compact.size() >= 16) {
-        compact.resize(16);
+    size_t close = findJsonCloser(json, open, '{', '}');
+    if (close == std::string::npos) {
+        return "";
     }
-    return utf8ToWide(compact);
+    return json.substr(open, close - open + 1);
 }
 
-std::wstring maskAccountId(const std::string& accountId) {
-    if (accountId.empty()) {
-        return L"Local auth";
+std::string extractFirstArrayString(const std::string& json, const std::string& key) {
+    const std::string needle = "\"" + key + "\"";
+    size_t keyPos = json.find(needle);
+    if (keyPos == std::string::npos) {
+        return "";
     }
-    const size_t keep = std::min<size_t>(8, accountId.size());
-    return L"..." + utf8ToWide(accountId.substr(accountId.size() - keep));
+    size_t colon = json.find(':', keyPos + needle.size());
+    size_t open = colon == std::string::npos ? std::string::npos : json.find('[', colon + 1);
+    if (open == std::string::npos) {
+        return "";
+    }
+    size_t quote = json.find('"', open + 1);
+    if (quote == std::string::npos) {
+        return "";
+    }
+
+    std::string out;
+    bool escape = false;
+    for (size_t i = quote + 1; i < json.size(); ++i) {
+        const char ch = json[i];
+        if (escape) {
+            out.push_back(ch);
+            escape = false;
+        } else if (ch == '\\') {
+            escape = true;
+        } else if (ch == '"') {
+            break;
+        } else {
+            out.push_back(ch);
+        }
+    }
+    return out;
+}
+
+std::wstring formatResetDetail(double value) {
+    if (value <= 0.0) {
+        return L"reset N/A";
+    }
+    if (value > 100000000000.0) {
+        value /= 1000.0;
+    }
+
+    std::time_t resetTime = static_cast<std::time_t>(value);
+    std::time_t nowTime = std::time(nullptr);
+    const double diff = std::max(0.0, std::difftime(resetTime, nowTime));
+    const int totalMinutes = static_cast<int>(std::round(diff / 60.0));
+    const int days = totalMinutes / (24 * 60);
+    const int hours = (totalMinutes % (24 * 60)) / 60;
+    const int minutes = totalMinutes % 60;
+
+    std::wstring remaining;
+    if (days > 0) {
+        remaining = std::to_wstring(days) + L"d " + std::to_wstring(hours) + L"h " + std::to_wstring(minutes) + L"m";
+    } else if (hours > 0) {
+        remaining = std::to_wstring(hours) + L"h " + std::to_wstring(minutes) + L"m";
+    } else {
+        remaining = std::to_wstring(minutes) + L"m";
+    }
+
+    std::tm resetLocal{};
+    if (localtime_s(&resetLocal, &resetTime) != 0) {
+        return remaining;
+    }
+
+    wchar_t dateBuffer[32]{};
+    swprintf(dateBuffer, 32, L"%02d/%02d %02d:%02d", resetLocal.tm_mon + 1, resetLocal.tm_mday,
+             resetLocal.tm_hour, resetLocal.tm_min);
+    return remaining + L" (" + dateBuffer + L")";
+}
+
+std::wstring quotaWindowLabel(double seconds) {
+    const int rounded = static_cast<int>(std::round(seconds));
+    if (std::abs(rounded - 5 * 60 * 60) <= 60) {
+        return L"5h";
+    }
+    if (std::abs(rounded - 7 * 24 * 60 * 60) <= 60) {
+        return L"Weekly";
+    }
+    if (rounded >= 24 * 60 * 60 && rounded % (24 * 60 * 60) == 0) {
+        return std::to_wstring(rounded / (24 * 60 * 60)) + L"d";
+    }
+    if (rounded >= 60 * 60 && rounded % (60 * 60) == 0) {
+        return std::to_wstring(rounded / (60 * 60)) + L"h";
+    }
+    if (rounded >= 60 && rounded % 60 == 0) {
+        return std::to_wstring(rounded / 60) + L"m";
+    }
+    return L"Limit";
 }
 
 std::wstring computerName() {
@@ -790,62 +909,41 @@ private:
             return quota;
         }
 
-        quota = localCodexSnapshot(authJson);
-
         std::string accessToken = extractJsonString(authJson, "access_token");
+        std::string accountId = extractJsonString(authJson, "account_id");
         if (accessToken.empty()) {
+            quota.status = L"Auth incomplete";
             return quota;
         }
 
         const std::vector<std::wstring> paths = {
-            L"/backend-api/codex/usage_limits",
-            L"/backend-api/codex/usage",
-            L"/backend-api/conversation_limit"
+            L"/backend-api/wham/usage",
+            L"/backend-api/wham/accounts/check"
         };
         for (const auto& path : paths) {
             DWORD statusCode = 0;
-            std::string body = httpGetChatGpt(path, accessToken, statusCode);
+            std::string body = httpGetChatGpt(path, accessToken, accountId, statusCode);
             if (statusCode >= 200 && statusCode < 300 && !body.empty()) {
                 parseQuotaBody(body, quota);
                 if (quota.available) {
                     return quota;
                 }
-                quota.status = quota.localAuth ? L"Local account" : L"Quota unreadable";
+                quota.status = L"Quota unreadable";
             } else if (statusCode == 401 || statusCode == 403) {
+                quota.status = L"Login expired";
                 return quota;
+            } else if (statusCode > 0) {
+                quota.status = L"Quota unavailable";
             }
         }
-        if (!quota.available && !quota.localAuth && quota.status == L"Auth not found") {
+        if (!quota.available && quota.status == L"Auth not found") {
             quota.status = L"Quota unavailable";
         }
         return quota;
     }
 
-    CodexQuota localCodexSnapshot(const std::string& authJson) {
-        CodexQuota quota;
-        quota.checked = true;
-        quota.localAuth = true;
-        quota.status = L"Local account";
-        quota.firstLabel = L"ID";
-        quota.secondLabel = L"Sync";
-
-        std::string accountId = extractJsonString(authJson, "account_id");
-        std::string lastRefresh = extractJsonString(authJson, "last_refresh");
-        std::string accessToken = extractJsonString(authJson, "access_token");
-
-        quota.fiveHour = maskAccountId(accountId);
-        quota.fiveHourReset = accessToken.empty() ? L"token missing" : L"token present";
-        quota.sevenDay = L"auth.json";
-        quota.sevenDayReset = compactIsoTime(lastRefresh);
-
-        if (accountId.empty() && accessToken.empty()) {
-            quota.localAuth = false;
-            quota.status = L"Auth incomplete";
-        }
-        return quota;
-    }
-
-    std::string httpGetChatGpt(const std::wstring& path, const std::string& accessToken, DWORD& statusCode) {
+    std::string httpGetChatGpt(const std::wstring& path, const std::string& accessToken,
+                               const std::string& accountId, DWORD& statusCode) {
         statusCode = 0;
         std::string response;
 
@@ -870,7 +968,15 @@ private:
             return response;
         }
 
-        std::string authHeader = "Authorization: Bearer " + accessToken + "\r\nAccept: application/json\r\n";
+        std::string authHeader = "Authorization: Bearer " + accessToken +
+                                 "\r\nAccept: application/json"
+                                 "\r\nOAI-Product-Sku: CODEX"
+                                 "\r\nOAI-Language: en"
+                                 "\r\noriginator: Codex Desktop";
+        if (!accountId.empty()) {
+            authHeader += "\r\nChatGPT-Account-Id: " + accountId;
+        }
+        authHeader += "\r\n";
         std::wstring headers = utf8ToWide(authHeader);
         BOOL ok = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(headers.size()),
                                      WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
@@ -899,71 +1005,113 @@ private:
     }
 
     void parseQuotaBody(const std::string& body, CodexQuota& quota) {
-        auto parseWindow = [&](const std::vector<std::string>& markers,
-                               std::wstring& amount,
-                               std::wstring& reset) {
-            size_t pos = std::string::npos;
-            for (const auto& marker : markers) {
-                pos = body.find(marker);
-                if (pos != std::string::npos) {
-                    break;
-                }
-            }
-            if (pos == std::string::npos) {
-                return false;
-            }
-
-            double remaining = 0.0;
-            double used = 0.0;
-            if (extractNumberAfter(body, pos, {"remaining_percent", "remaining_percentage", "percent_remaining"}, remaining)) {
-                if (remaining > 1.0) {
-                    remaining /= 100.0;
-                }
-                amount = formatPercent(std::clamp(remaining, 0.0, 1.0)) + L" left";
-            } else if (extractNumberAfter(body, pos, {"used_percent", "used_percentage", "usage_percent", "percent_used"}, used)) {
-                if (used > 1.0) {
-                    used /= 100.0;
-                }
-                amount = formatPercent(1.0 - std::clamp(used, 0.0, 1.0)) + L" left";
-            } else {
-                amount = L"Available";
-            }
-
-            reset = extractStringAfter(body, pos, {"resets_at", "reset_at", "reset_time", "next_reset_at"});
-            if (reset == L"N/A") {
-                double seconds = 0.0;
-                if (extractNumberAfter(body, pos, {"reset_after_seconds", "seconds_until_reset"}, seconds)) {
-                    int totalMinutes = static_cast<int>(seconds / 60.0);
-                    reset = std::to_wstring(totalMinutes / 60) + L"h " + std::to_wstring(totalMinutes % 60) + L"m";
-                }
-            }
-            return true;
-        };
-
-        bool five = parseWindow({"5h", "5_hour", "five_hour", "short"}, quota.fiveHour, quota.fiveHourReset);
-        bool seven = parseWindow({"7d", "7_day", "seven_day", "weekly", "long"}, quota.sevenDay, quota.sevenDayReset);
-
-        if (!five && !seven) {
-            double remaining = 0.0;
-            if (extractNumberAfter(body, 0, {"remaining_percent", "remaining_percentage", "percent_remaining"}, remaining)) {
-                if (remaining > 1.0) {
-                    remaining /= 100.0;
-                }
-                quota.fiveHour = formatPercent(std::clamp(remaining, 0.0, 1.0)) + L" left";
-                quota.fiveHourReset = extractStringAfter(body, 0, {"resets_at", "reset_at", "next_reset_at"});
-                five = true;
+        std::string rateLimit = extractJsonObjectForKey(body, "rate_limit");
+        if (rateLimit.empty()) {
+            std::string account = selectedCodexAccount(body);
+            if (!account.empty()) {
+                rateLimit = extractJsonObjectForKey(account, "rate_limit");
             }
         }
-
-        quota.available = five || seven;
-        if (quota.available) {
-            quota.localAuth = false;
-            quota.status = L"Codex quota";
-            quota.firstLabel = L"5h";
-            quota.secondLabel = L"7d";
-        } else if (!quota.localAuth) {
-            quota.status = L"Quota unavailable";
+        if (rateLimit.empty()) {
+            quota.status = L"No quota";
+            return;
         }
+
+        QuotaWindow primary = parseLimitWindow(rateLimit, "primary_window");
+        QuotaWindow secondary = parseLimitWindow(rateLimit, "secondary_window");
+
+        if (!primary.available && !secondary.available) {
+            quota.status = L"Quota unreadable";
+            return;
+        }
+
+        quota.available = true;
+        quota.localAuth = false;
+        quota.status = L"Codex quota";
+        if (primary.available) {
+            quota.firstLabel = primary.label;
+            quota.fiveHour = primary.remaining;
+            quota.fiveHourReset = primary.reset;
+            quota.firstUsage = primary.usage;
+            quota.firstProgress = primary.progress;
+        }
+        if (secondary.available) {
+            quota.secondLabel = secondary.label;
+            quota.sevenDay = secondary.remaining;
+            quota.sevenDayReset = secondary.reset;
+            quota.secondUsage = secondary.usage;
+            quota.secondProgress = secondary.progress;
+        }
+    }
+
+    std::string selectedCodexAccount(const std::string& body) {
+        std::string selectedId = extractFirstArrayString(body, "account_ordering");
+        size_t accountsKey = body.find("\"accounts\"");
+        if (accountsKey == std::string::npos) {
+            return "";
+        }
+        size_t colon = body.find(':', accountsKey);
+        size_t arrayOpen = colon == std::string::npos ? std::string::npos : body.find('[', colon + 1);
+        if (arrayOpen == std::string::npos) {
+            return "";
+        }
+        size_t arrayClose = findJsonCloser(body, arrayOpen, '[', ']');
+        if (arrayClose == std::string::npos) {
+            return "";
+        }
+
+        std::string fallback;
+        for (size_t pos = arrayOpen + 1; pos < arrayClose;) {
+            size_t objectOpen = body.find('{', pos);
+            if (objectOpen == std::string::npos || objectOpen >= arrayClose) {
+                break;
+            }
+            size_t objectClose = findJsonCloser(body, objectOpen, '{', '}');
+            if (objectClose == std::string::npos || objectClose > arrayClose) {
+                break;
+            }
+
+            std::string object = body.substr(objectOpen, objectClose - objectOpen + 1);
+            if (fallback.empty() && object.find("\"rate_limit\"") != std::string::npos) {
+                fallback = object;
+            }
+            std::string id = extractJsonString(object, "id");
+            if (!selectedId.empty() && id == selectedId) {
+                return object;
+            }
+            pos = objectClose + 1;
+        }
+        return fallback;
+    }
+
+    QuotaWindow parseLimitWindow(const std::string& rateLimit, const std::string& key) {
+        QuotaWindow window;
+        std::string object = extractJsonObjectForKey(rateLimit, key);
+        if (object.empty()) {
+            return window;
+        }
+
+        double used = 0.0;
+        if (!extractNumberAfter(object, 0, {"used_percent"}, used)) {
+            return window;
+        }
+
+        double windowSeconds = 0.0;
+        extractNumberAfter(object, 0, {"limit_window_seconds"}, windowSeconds);
+        double resetAt = 0.0;
+        extractNumberAfter(object, 0, {"reset_at"}, resetAt);
+
+        const double usedFraction = used > 1.0 ? used / 100.0 : used;
+        window.available = true;
+        window.usedPercent = used;
+        window.windowSeconds = windowSeconds;
+        window.resetAt = resetAt;
+        window.label = quotaWindowLabel(windowSeconds);
+        window.remaining = formatPercent(1.0 - std::clamp(usedFraction, 0.0, 1.0)) + L" left";
+        window.reset = formatResetDetail(resetAt);
+        window.usage = formatPercent(std::clamp(usedFraction, 0.0, 1.0));
+        window.progress = std::clamp(usedFraction, 0.0, 1.0);
+        return window;
     }
 };
 
@@ -1274,12 +1422,12 @@ private:
         drawMemoryCard(g, RectF(margin, top + 144, width - margin * 2.0f, 104));
 
         const REAL quotaY = top + 260;
-        drawQuotaCard(g, RectF(margin, quotaY, width - margin * 2.0f, 88));
+        drawQuotaCard(g, RectF(margin, quotaY, width - margin * 2.0f, 132));
 
-        const REAL appsY = quotaY + 100;
-        drawTopAppsCard(g, RectF(margin, appsY, width - margin * 2.0f, 126));
+        const REAL appsY = quotaY + 144;
+        drawTopAppsCard(g, RectF(margin, appsY, width - margin * 2.0f, 116));
 
-        const REAL rowY = appsY + 138;
+        const REAL rowY = appsY + 128;
         drawSmallStatCard(g, RectF(margin, rowY, halfW, 76), L"Network",
                           L"↓ " + formatSpeed(metrics_.netDown),
                           L"↑ " + formatSpeed(metrics_.netUp),
@@ -1364,29 +1512,53 @@ private:
 
     void drawQuotaCard(Graphics& g, RectF rect) {
         drawPanel(g, rect);
-        Font title = makeFont(16, FontStyleBold);
-        Font label = makeFont(12, FontStyleBold);
-        Font value = makeFont(13, FontStyleBold);
-
-        drawText(g, L"Codex Quota", RectF(rect.X + 18, rect.Y + 12, 170, 22), title, colorFromHex(35, 32, 43));
-        Color statusColor = metrics_.quota.available
-            ? colorFromHex(63, 119, 88)
-            : (metrics_.quota.localAuth ? colorFromHex(73, 90, 150) : colorFromHex(148, 70, 70));
-        drawText(g, metrics_.quota.status, RectF(rect.X + rect.Width - 150, rect.Y + 13, 128, 20), label,
-                 statusColor, StringAlignmentFar);
-
-        drawQuotaLine(g, rect.X + 18, rect.Y + 40, metrics_.quota.firstLabel, metrics_.quota.fiveHour,
-                      metrics_.quota.fiveHourReset, value);
-        drawQuotaLine(g, rect.X + 18, rect.Y + 62, metrics_.quota.secondLabel, metrics_.quota.sevenDay,
-                      metrics_.quota.sevenDayReset, value);
+        std::wstring firstDetail = metrics_.quota.available ? metrics_.quota.fiveHourReset : metrics_.quota.status;
+        std::wstring secondDetail = metrics_.quota.available ? metrics_.quota.sevenDayReset : L"";
+        drawQuotaLine(g, RectF(rect.X + 18, rect.Y + 13, rect.Width - 36, 48), false, metrics_.quota.firstLabel,
+                      metrics_.quota.firstUsage, metrics_.quota.firstProgress, firstDetail);
+        drawQuotaLine(g, RectF(rect.X + 18, rect.Y + 72, rect.Width - 36, 48), true, metrics_.quota.secondLabel,
+                      metrics_.quota.secondUsage, metrics_.quota.secondProgress, secondDetail);
     }
 
-    void drawQuotaLine(Graphics& g, REAL x, REAL y, const std::wstring& window, const std::wstring& left,
-                       const std::wstring& reset, Font& font) {
-        drawText(g, window, RectF(x, y, 36, 18), font, colorFromHex(65, 58, 74));
-        drawText(g, left, RectF(x + 42, y, 100, 18), font, colorFromHex(48, 44, 58));
-        const std::wstring suffix = (window == L"5h" || window == L"7d") ? (L"reset " + reset) : reset;
-        drawText(g, suffix, RectF(x + 148, y, 207, 18), font, colorFromHex(82, 74, 92));
+    void drawQuotaLine(Graphics& g, RectF rect, bool weekly, const std::wstring& window,
+                       const std::wstring& usage, double progress, const std::wstring& reset) {
+        Font label = makeFont(15, FontStyleRegular);
+        Font percent = makeFont(15, FontStyleBold);
+        Font detail = makeFont(12, FontStyleRegular);
+        Color text = colorFromHex(67, 82, 104);
+        Color orange = colorFromHex(245, 128, 10);
+
+        drawQuotaIcon(g, rect.X, rect.Y + 1.0f, weekly, text);
+        drawText(g, window, RectF(rect.X + 27, rect.Y - 1, 150, 22), label, text);
+        drawText(g, usage, RectF(rect.X + rect.Width - 78, rect.Y - 1, 78, 22), percent, orange, StringAlignmentFar);
+
+        RectF bar(rect.X, rect.Y + 27, rect.Width, 7);
+        auto bgPath = roundedRect(bar, 3.5f);
+        SolidBrush bg(Color(176, 226, 232, 238));
+        g.FillPath(&bg, bgPath.get());
+        if (progress > 0.0) {
+            RectF fill = bar;
+            fill.Width *= static_cast<REAL>(std::clamp(progress, 0.0, 1.0));
+            auto fillPath = roundedRect(fill, 3.5f);
+            SolidBrush fillBrush(orange);
+            g.FillPath(&fillBrush, fillPath.get());
+        }
+
+        drawText(g, reset, RectF(rect.X + 116, rect.Y + 37, rect.Width - 116, 18), detail, text, StringAlignmentFar);
+    }
+
+    void drawQuotaIcon(Graphics& g, REAL x, REAL y, bool weekly, Color color) {
+        Pen pen(color, 1.6f);
+        if (!weekly) {
+            g.DrawEllipse(&pen, x, y + 1.0f, 15.0f, 15.0f);
+            g.DrawLine(&pen, x + 7.5f, y + 4.5f, x + 7.5f, y + 9.0f);
+            g.DrawLine(&pen, x + 7.5f, y + 9.0f, x + 11.0f, y + 11.0f);
+            return;
+        }
+        g.DrawRectangle(&pen, x + 1.0f, y + 3.0f, 14.0f, 13.0f);
+        g.DrawLine(&pen, x + 1, y + 7, x + 15, y + 7);
+        g.DrawLine(&pen, x + 5, y + 1, x + 5, y + 5);
+        g.DrawLine(&pen, x + 11, y + 1, x + 11, y + 5);
     }
 
     void drawTopAppsCard(Graphics& g, RectF rect) {
