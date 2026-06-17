@@ -101,6 +101,7 @@ struct QuotaWindow {
 
 struct Metrics {
     double cpu = 0.0;
+    double gpu = -1.0;
     double memory = 0.0;
     double disk = 0.0;
     double network = 0.0;
@@ -824,10 +825,14 @@ private:
         }
 
         std::map<DWORD, double> usageByPid;
+        double totalGpu = 0.0;
         for (DWORD i = 0; i < itemCount; ++i) {
             if (items[i].FmtValue.CStatus != ERROR_SUCCESS || !items[i].szName) {
                 continue;
             }
+            const double usage = std::max(0.0, items[i].FmtValue.doubleValue);
+            totalGpu += usage;
+
             std::wstring instance = items[i].szName;
             size_t pidPos = instance.find(L"pid_");
             if (pidPos == std::wstring::npos) {
@@ -840,9 +845,10 @@ private:
                 ++pidPos;
             }
             if (pid != 0) {
-                usageByPid[pid] += std::max(0.0, items[i].FmtValue.doubleValue);
+                usageByPid[pid] += usage;
             }
         }
+        metrics.gpu = std::clamp(totalGpu / 100.0, 0.0, 1.0);
 
         for (const auto& [pid, gpu] : usageByPid) {
             if (gpu <= 0.05) {
@@ -1184,6 +1190,7 @@ private:
     Metrics metrics_;
     std::wstring machineName_ = computerName();
     SampleHistory cpuHistory_;
+    SampleHistory gpuHistory_;
     SampleHistory memoryHistory_;
     SampleHistory diskHistory_;
     SampleHistory networkHistory_;
@@ -1257,6 +1264,7 @@ private:
 
     void updateHistory() {
         cpuHistory_.push(metrics_.cpu);
+        gpuHistory_.push(metrics_.gpu >= 0.0 ? metrics_.gpu : 0.0);
         memoryHistory_.push(metrics_.memory);
         diskHistory_.push(metrics_.disk);
         networkHistory_.push(metrics_.network);
@@ -1471,16 +1479,13 @@ private:
         Font small = makeFont(12, FontStyleBold);
 
         drawText(g, L"GPU", RectF(rect.X + 18, rect.Y + 18, rect.Width - 36, 24), label, colorFromHex(35, 32, 43));
-        drawText(g, L"N/A", RectF(rect.X + rect.Width - 92, rect.Y + 16, 74, 34), valueFont, colorFromHex(31, 29, 39),
+        drawText(g, metrics_.gpu >= 0.0 ? formatPercent(metrics_.gpu) : L"N/A",
+                 RectF(rect.X + rect.Width - 92, rect.Y + 16, 74, 34), valueFont, colorFromHex(31, 29, 39),
                  StringAlignmentFar);
         drawText(g, metrics_.gpuName, RectF(rect.X + 18, rect.Y + 52, rect.Width - 36, 36), small, colorFromHex(65, 58, 74));
 
-        Pen line(Color(130, 83, 118, 224), 2.0f);
-        for (int i = 0; i < 5; ++i) {
-            const REAL y = rect.Y + 102 + i * 5.0f;
-            g.DrawLine(&line, rect.X + 18 + i * 22.0f, y, rect.X + 34 + i * 22.0f, y - 8.0f);
-        }
-        drawLegend(g, rect.X + 18, rect.Y + rect.Height - 24, L"display adapter", colorFromHex(83, 118, 224));
+        drawSparkline(g, RectF(rect.X + 18, rect.Y + 82, rect.Width - 36, 32), gpuHistory_, colorFromHex(83, 118, 224));
+        drawLegend(g, rect.X + 18, rect.Y + rect.Height - 24, L"GPU engine", colorFromHex(83, 118, 224));
     }
 
     void drawMemoryCard(Graphics& g, RectF rect) {
