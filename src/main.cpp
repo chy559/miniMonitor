@@ -46,7 +46,7 @@ constexpr UINT kTrayMessage = WM_APP + 42;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
 constexpr int kPanelWidth = 430;
-constexpr int kPanelHeight = 780;
+constexpr int kPanelHeight = 820;
 constexpr int kHistorySize = 64;
 
 struct SampleHistory {
@@ -526,7 +526,7 @@ public:
         }
     }
 
-    Metrics collect() {
+    Metrics collect(bool forceCodexQuota = false) {
         Metrics metrics;
         metrics.cpu = sampleCpu();
         sampleMemory(metrics);
@@ -536,7 +536,7 @@ public:
         metrics.gpuName = gpuName_;
         sampleProcesses(metrics);
         sampleGpuProcesses(metrics);
-        sampleCodexQuota(metrics);
+        sampleCodexQuota(metrics, forceCodexQuota);
         return metrics;
     }
 
@@ -885,9 +885,9 @@ private:
         return name;
     }
 
-    void sampleCodexQuota(Metrics& metrics) {
+    void sampleCodexQuota(Metrics& metrics, bool forceRefresh) {
         const ULONGLONG now = GetTickCount64();
-        if (cachedQuota_.checked && now >= cachedQuota_.lastCheckedTick &&
+        if (!forceRefresh && cachedQuota_.checked && now >= cachedQuota_.lastCheckedTick &&
             now - cachedQuota_.lastCheckedTick < 5ULL * 60ULL * 1000ULL) {
             metrics.quota = cachedQuota_;
             return;
@@ -1325,6 +1325,11 @@ private:
     void handleClick(int x, int y) {
         RECT client{};
         GetClientRect(hwnd_, &client);
+        if (containsPoint(quotaRefreshButtonRect(client.right), x, y)) {
+            refreshCodexQuotaNow();
+            return;
+        }
+
         const int bottom = client.bottom - 42;
         if (y < bottom) {
             return;
@@ -1336,6 +1341,34 @@ private:
         } else if (x >= client.right - 170) {
             ShowWindow(hwnd_, SW_HIDE);
         }
+    }
+
+    bool containsPoint(RectF rect, int x, int y) {
+        return static_cast<REAL>(x) >= rect.X && static_cast<REAL>(x) <= rect.X + rect.Width &&
+               static_cast<REAL>(y) >= rect.Y && static_cast<REAL>(y) <= rect.Y + rect.Height;
+    }
+
+    RectF quotaRefreshButtonRect(int width) {
+        const REAL margin = 18.0f;
+        const REAL top = 96.0f;
+        const REAL quotaY = top + 260.0f;
+        return RectF(static_cast<REAL>(width) - margin - 118.0f, quotaY + 130.0f, 100.0f, 24.0f);
+    }
+
+    void refreshCodexQuotaNow() {
+        metrics_.quota.checked = true;
+        metrics_.quota.available = false;
+        metrics_.quota.status = L"Refreshing";
+        metrics_.quota.firstUsage = L"...";
+        metrics_.quota.secondUsage = L"...";
+        metrics_.quota.firstProgress = 0.0;
+        metrics_.quota.secondProgress = 0.0;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        UpdateWindow(hwnd_);
+
+        metrics_ = sampler_.collect(true);
+        updateHistory();
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
     Font makeFont(REAL size, INT style = FontStyleRegular) {
@@ -1430,9 +1463,9 @@ private:
         drawMemoryCard(g, RectF(margin, top + 144, width - margin * 2.0f, 104));
 
         const REAL quotaY = top + 260;
-        drawQuotaCard(g, RectF(margin, quotaY, width - margin * 2.0f, 132));
+        drawQuotaCard(g, RectF(margin, quotaY, width - margin * 2.0f, 164), width);
 
-        const REAL appsY = quotaY + 144;
+        const REAL appsY = quotaY + 176;
         drawTopAppsCard(g, RectF(margin, appsY, width - margin * 2.0f, 116));
 
         const REAL rowY = appsY + 128;
@@ -1515,7 +1548,7 @@ private:
         drawSparkline(g, RectF(rect.X + rect.Width - 130, rect.Y + 76, 108, 18), memoryHistory_, colorFromHex(223, 157, 67));
     }
 
-    void drawQuotaCard(Graphics& g, RectF rect) {
+    void drawQuotaCard(Graphics& g, RectF rect, int width) {
         drawPanel(g, rect);
         std::wstring firstDetail = metrics_.quota.available ? metrics_.quota.fiveHourReset : metrics_.quota.status;
         std::wstring secondDetail = metrics_.quota.available ? metrics_.quota.sevenDayReset : L"";
@@ -1523,6 +1556,7 @@ private:
                       metrics_.quota.firstUsage, metrics_.quota.firstProgress, firstDetail);
         drawQuotaLine(g, RectF(rect.X + 18, rect.Y + 72, rect.Width - 36, 48), true, metrics_.quota.secondLabel,
                       metrics_.quota.secondUsage, metrics_.quota.secondProgress, secondDetail);
+        drawQuotaRefreshButton(g, quotaRefreshButtonRect(width));
     }
 
     void drawQuotaLine(Graphics& g, RectF rect, bool weekly, const std::wstring& window,
@@ -1564,6 +1598,27 @@ private:
         g.DrawLine(&pen, x + 1, y + 7, x + 15, y + 7);
         g.DrawLine(&pen, x + 5, y + 1, x + 5, y + 5);
         g.DrawLine(&pen, x + 11, y + 1, x + 11, y + 5);
+    }
+
+    void drawQuotaRefreshButton(Graphics& g, RectF rect) {
+        auto path = roundedRect(rect, 7.0f);
+        SolidBrush bg(Color(214, 255, 250, 255));
+        g.FillPath(&bg, path.get());
+        Pen border(Color(80, 213, 203, 220), 1.0f);
+        g.DrawPath(&border, path.get());
+
+        Pen icon(colorFromHex(67, 82, 104), 1.7f);
+        icon.SetStartCap(LineCapRound);
+        icon.SetEndCap(LineCapRound);
+        const REAL cx = rect.X + 13.0f;
+        const REAL cy = rect.Y + rect.Height / 2.0f;
+        g.DrawArc(&icon, cx - 6.0f, cy - 6.0f, 12.0f, 12.0f, 35.0f, 280.0f);
+        g.DrawLine(&icon, cx + 4.5f, cy - 6.0f, cx + 8.0f, cy - 6.0f);
+        g.DrawLine(&icon, cx + 8.0f, cy - 6.0f, cx + 8.0f, cy - 2.5f);
+
+        Font font = makeFont(12, FontStyleBold);
+        drawText(g, L"Refresh", RectF(rect.X + 28, rect.Y + 3, rect.Width - 32, 18), font,
+                 colorFromHex(67, 82, 104));
     }
 
     void drawTopAppsCard(Graphics& g, RectF rect) {
