@@ -59,6 +59,10 @@ constexpr UINT kMenuRefreshInterval1s = 12;
 constexpr UINT kMenuRefreshInterval2s = 13;
 constexpr UINT kMenuRefreshInterval5s = 14;
 constexpr UINT kMenuOpenTaskManager = 15;
+constexpr UINT kMenuToggleLockPosition = 16;
+constexpr UINT kMenuOpacity100 = 17;
+constexpr UINT kMenuOpacity90 = 18;
+constexpr UINT kMenuOpacity80 = 19;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -1223,11 +1227,13 @@ public:
         startHidden_ = readBoolSetting(L"StartHidden", false);
         alwaysOnTop_ = readBoolSetting(L"AlwaysOnTop", false);
         paused_ = readBoolSetting(L"Paused", false);
+        lockPosition_ = readBoolSetting(L"LockPosition", false);
         refreshIntervalMs_ = sanitizeRefreshInterval(readDwordSetting(L"RefreshIntervalMs", kDefaultRefreshIntervalMs));
+        windowOpacity_ = sanitizeWindowOpacity(readDwordSetting(L"WindowOpacity", 255));
         POINT panelPos = startupPanelPosition(workArea, panelHeight);
 
         hwnd_ = CreateWindowExW(
-            WS_EX_TOOLWINDOW | (alwaysOnTop_ ? WS_EX_TOPMOST : 0),
+            WS_EX_TOOLWINDOW | WS_EX_LAYERED | (alwaysOnTop_ ? WS_EX_TOPMOST : 0),
             kClassName,
             kAppTitle,
             WS_POPUP,
@@ -1245,6 +1251,7 @@ public:
         }
 
         SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, kPanelWidth, panelHeight, 24, 24), TRUE);
+        applyWindowOpacity();
         SetTimer(hwnd_, kRefreshTimer, refreshIntervalMs_, nullptr);
         addTrayIcon();
         metrics_ = sampler_.collect();
@@ -1274,7 +1281,9 @@ private:
     bool startHidden_ = false;
     bool alwaysOnTop_ = false;
     bool paused_ = false;
+    bool lockPosition_ = false;
     UINT refreshIntervalMs_ = kDefaultRefreshIntervalMs;
+    BYTE windowOpacity_ = 255;
 
     static AppWindow* fromWindow(HWND hwnd) {
         return reinterpret_cast<AppWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -1362,6 +1371,14 @@ private:
                 setRefreshInterval(5000);
             } else if (LOWORD(wParam) == kMenuOpenTaskManager) {
                 openTaskManager();
+            } else if (LOWORD(wParam) == kMenuToggleLockPosition) {
+                toggleLockPosition();
+            } else if (LOWORD(wParam) == kMenuOpacity100) {
+                setWindowOpacity(255);
+            } else if (LOWORD(wParam) == kMenuOpacity90) {
+                setWindowOpacity(230);
+            } else if (LOWORD(wParam) == kMenuOpacity80) {
+                setWindowOpacity(205);
             }
             return 0;
         case kTrayMessage:
@@ -1437,6 +1454,13 @@ private:
             return static_cast<UINT>(value);
         }
         return kDefaultRefreshIntervalMs;
+    }
+
+    BYTE sanitizeWindowOpacity(DWORD value) {
+        if (value == 255 || value == 230 || value == 205) {
+            return static_cast<BYTE>(value);
+        }
+        return 255;
     }
 
     std::wstring executablePath() {
@@ -1649,6 +1673,7 @@ private:
         appendInfoItem(menu, L"磁盘 Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
                              L"    Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"));
         appendInfoItem(menu, L"刷新间隔 " + refreshIntervalText());
+        appendInfoItem(menu, L"窗口透明度 " + opacityText());
         appendInfoItem(menu, trayQuotaText());
         appendInfoItem(menu, trayTopProcessText());
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1661,10 +1686,15 @@ private:
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (paused_ ? MF_CHECKED : MF_UNCHECKED), kMenuTogglePause, paused_ ? L"继续刷新" : L"暂停刷新");
         AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAlwaysOnTop, L"窗口置顶");
+        AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleLockPosition, L"锁定窗口位置");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 1000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval1s, L"刷新间隔: 1 秒");
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 2000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval2s, L"刷新间隔: 2 秒");
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 5000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval5s, L"刷新间隔: 5 秒");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (windowOpacity_ == 255 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity100, L"透明度: 100%");
+        AppendMenuW(menu, MF_STRING | (windowOpacity_ == 230 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity90, L"透明度: 90%");
+        AppendMenuW(menu, MF_STRING | (windowOpacity_ == 205 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity80, L"透明度: 80%");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (startHidden_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleStartHidden, L"启动时隐藏面板");
         AppendMenuW(menu, MF_STRING | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAutoStart, L"开机自启");
@@ -1684,6 +1714,9 @@ private:
         }
         if (alwaysOnTop_) {
             text += L" / 已置顶";
+        }
+        if (lockPosition_) {
+            text += L" / 已锁定";
         }
         return text;
     }
@@ -1789,11 +1822,37 @@ private:
         return buffer;
     }
 
+    std::wstring opacityText() {
+        wchar_t buffer[32];
+        swprintf(buffer, 32, L"%u%%", static_cast<unsigned int>((static_cast<unsigned int>(windowOpacity_) * 100 + 127) / 255));
+        return buffer;
+    }
+
     void openTaskManager() {
         HINSTANCE result = ShellExecuteW(hwnd_, L"open", L"taskmgr.exe", nullptr, nullptr, SW_SHOWNORMAL);
         if (reinterpret_cast<INT_PTR>(result) <= 32) {
             showTrayBalloon(L"MiniMonitor", L"无法打开任务管理器。");
         }
+    }
+
+    void applyWindowOpacity() {
+        if (!hwnd_) {
+            return;
+        }
+        SetLayeredWindowAttributes(hwnd_, 0, windowOpacity_, LWA_ALPHA);
+    }
+
+    void setWindowOpacity(BYTE opacity) {
+        windowOpacity_ = sanitizeWindowOpacity(opacity);
+        writeDwordSetting(L"WindowOpacity", windowOpacity_);
+        applyWindowOpacity();
+        showTrayBalloon(L"MiniMonitor", L"窗口透明度已设置为 " + opacityText() + L"。");
+    }
+
+    void toggleLockPosition() {
+        lockPosition_ = !lockPosition_;
+        writeBoolSetting(L"LockPosition", lockPosition_);
+        showTrayBalloon(L"MiniMonitor", lockPosition_ ? L"窗口位置已锁定，标题区不会拖动。" : L"窗口位置锁定已关闭。");
     }
 
     void toggleStartHidden() {
@@ -1882,6 +1941,9 @@ private:
     }
 
     LRESULT hitTest(LPARAM lParam) {
+        if (lockPosition_) {
+            return HTCLIENT;
+        }
         POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         ScreenToClient(hwnd_, &point);
         RECT client{};
