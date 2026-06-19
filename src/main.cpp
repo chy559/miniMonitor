@@ -63,6 +63,7 @@ constexpr UINT kMenuToggleLockPosition = 16;
 constexpr UINT kMenuOpacity100 = 17;
 constexpr UINT kMenuOpacity90 = 18;
 constexpr UINT kMenuOpacity80 = 19;
+constexpr UINT kMenuToggleHighUsageAlerts = 20;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -74,6 +75,8 @@ constexpr int kPanelWidth = 430;
 constexpr int kPanelHeight = 820;
 constexpr int kHistorySize = 64;
 constexpr UINT kDefaultRefreshIntervalMs = 2000;
+constexpr double kHighUsageThreshold = 0.90;
+constexpr ULONGLONG kHighUsageAlertCooldownMs = 5 * 60 * 1000;
 
 struct SampleHistory {
     std::deque<double> values;
@@ -1228,6 +1231,7 @@ public:
         alwaysOnTop_ = readBoolSetting(L"AlwaysOnTop", false);
         paused_ = readBoolSetting(L"Paused", false);
         lockPosition_ = readBoolSetting(L"LockPosition", false);
+        highUsageAlerts_ = readBoolSetting(L"HighUsageAlerts", false);
         refreshIntervalMs_ = sanitizeRefreshInterval(readDwordSetting(L"RefreshIntervalMs", kDefaultRefreshIntervalMs));
         windowOpacity_ = sanitizeWindowOpacity(readDwordSetting(L"WindowOpacity", 255));
         POINT panelPos = startupPanelPosition(workArea, panelHeight);
@@ -1256,6 +1260,7 @@ public:
         addTrayIcon();
         metrics_ = sampler_.collect();
         updateHistory();
+        checkHighUsageAlerts();
         updateTrayTip();
         if (startHidden_) {
             ShowWindow(hwnd_, SW_HIDE);
@@ -1282,8 +1287,10 @@ private:
     bool alwaysOnTop_ = false;
     bool paused_ = false;
     bool lockPosition_ = false;
+    bool highUsageAlerts_ = false;
     UINT refreshIntervalMs_ = kDefaultRefreshIntervalMs;
     BYTE windowOpacity_ = 255;
+    ULONGLONG lastHighUsageAlertTick_ = 0;
 
     static AppWindow* fromWindow(HWND hwnd) {
         return reinterpret_cast<AppWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -1313,6 +1320,7 @@ private:
                 }
                 metrics_ = sampler_.collect();
                 updateHistory();
+                checkHighUsageAlerts();
                 updateTrayTip();
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
@@ -1379,6 +1387,8 @@ private:
                 setWindowOpacity(230);
             } else if (LOWORD(wParam) == kMenuOpacity80) {
                 setWindowOpacity(205);
+            } else if (LOWORD(wParam) == kMenuToggleHighUsageAlerts) {
+                toggleHighUsageAlerts();
             }
             return 0;
         case kTrayMessage:
@@ -1687,6 +1697,7 @@ private:
         AppendMenuW(menu, MF_STRING | (paused_ ? MF_CHECKED : MF_UNCHECKED), kMenuTogglePause, paused_ ? L"继续刷新" : L"暂停刷新");
         AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAlwaysOnTop, L"窗口置顶");
         AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleLockPosition, L"锁定窗口位置");
+        AppendMenuW(menu, MF_STRING | (highUsageAlerts_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleHighUsageAlerts, L"高占用提醒");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 1000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval1s, L"刷新间隔: 1 秒");
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 2000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval2s, L"刷新间隔: 2 秒");
@@ -1717,6 +1728,9 @@ private:
         }
         if (lockPosition_) {
             text += L" / 已锁定";
+        }
+        if (highUsageAlerts_) {
+            text += L" / 高占用提醒";
         }
         return text;
     }
@@ -1799,11 +1813,49 @@ private:
     void refreshNow(bool showFeedback) {
         metrics_ = sampler_.collect();
         updateHistory();
+        checkHighUsageAlerts();
         updateTrayTip();
         InvalidateRect(hwnd_, nullptr, FALSE);
         if (showFeedback) {
             showTrayBalloon(L"MiniMonitor", L"状态已刷新。");
         }
+    }
+
+    void checkHighUsageAlerts() {
+        if (!highUsageAlerts_ || paused_) {
+            return;
+        }
+
+        const bool highCpu = metrics_.cpu >= kHighUsageThreshold;
+        const bool highMemory = metrics_.memory >= kHighUsageThreshold;
+        if (!highCpu && !highMemory) {
+            return;
+        }
+
+        const ULONGLONG now = GetTickCount64();
+        if (lastHighUsageAlertTick_ != 0 && now - lastHighUsageAlertTick_ < kHighUsageAlertCooldownMs) {
+            return;
+        }
+        lastHighUsageAlertTick_ = now;
+
+        std::wstring message;
+        if (highCpu) {
+            message += L"CPU " + formatPercent(metrics_.cpu);
+            if (!metrics_.topCpu.empty()) {
+                message += L" · " + metrics_.topCpu.front().name + L" " + formatOneDecimalPercent(metrics_.topCpu.front().cpu);
+            }
+        }
+        if (highMemory) {
+            if (!message.empty()) {
+                message += L"\n";
+            }
+            message += L"内存 " + formatPercent(metrics_.memory);
+            if (!metrics_.topMemory.empty()) {
+                message += L" · " + metrics_.topMemory.front().name + L" " +
+                           formatBytes(static_cast<double>(metrics_.topMemory.front().memory));
+            }
+        }
+        showTrayBalloon(L"MiniMonitor 高占用提醒", message);
     }
 
     void setRefreshInterval(UINT intervalMs) {
@@ -1853,6 +1905,15 @@ private:
         lockPosition_ = !lockPosition_;
         writeBoolSetting(L"LockPosition", lockPosition_);
         showTrayBalloon(L"MiniMonitor", lockPosition_ ? L"窗口位置已锁定，标题区不会拖动。" : L"窗口位置锁定已关闭。");
+    }
+
+    void toggleHighUsageAlerts() {
+        highUsageAlerts_ = !highUsageAlerts_;
+        writeBoolSetting(L"HighUsageAlerts", highUsageAlerts_);
+        if (highUsageAlerts_) {
+            lastHighUsageAlertTick_ = 0;
+        }
+        showTrayBalloon(L"MiniMonitor", highUsageAlerts_ ? L"高占用提醒已开启，CPU 或内存超过 90% 时提醒。" : L"高占用提醒已关闭。");
     }
 
     void toggleStartHidden() {
