@@ -69,6 +69,7 @@ constexpr UINT kMenuAlertThreshold90 = 22;
 constexpr UINT kMenuAlertThreshold95 = 23;
 constexpr UINT kMenuOpenResourceMonitor = 24;
 constexpr UINT kMenuToggleGlobalHotkey = 25;
+constexpr UINT kMenuToggleBackgroundEcoMode = 26;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -81,6 +82,7 @@ constexpr int kPanelHeight = 820;
 constexpr int kHistorySize = 64;
 constexpr int kHotkeyTogglePanel = 2001;
 constexpr UINT kDefaultRefreshIntervalMs = 2000;
+constexpr UINT kBackgroundEcoRefreshIntervalMs = 10000;
 constexpr DWORD kDefaultHighUsageAlertThreshold = 90;
 constexpr ULONGLONG kHighUsageAlertCooldownMs = 5 * 60 * 1000;
 
@@ -1239,6 +1241,7 @@ public:
         lockPosition_ = readBoolSetting(L"LockPosition", false);
         highUsageAlerts_ = readBoolSetting(L"HighUsageAlerts", false);
         globalHotkeyEnabled_ = readBoolSetting(L"GlobalHotkeyEnabled", true);
+        backgroundEcoMode_ = readBoolSetting(L"BackgroundEcoMode", false);
         highUsageAlertThreshold_ = sanitizeAlertThreshold(readDwordSetting(L"HighUsageAlertThreshold", kDefaultHighUsageAlertThreshold));
         refreshIntervalMs_ = sanitizeRefreshInterval(readDwordSetting(L"RefreshIntervalMs", kDefaultRefreshIntervalMs));
         windowOpacity_ = sanitizeWindowOpacity(readDwordSetting(L"WindowOpacity", 255));
@@ -1265,18 +1268,17 @@ public:
         SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, kPanelWidth, panelHeight, 24, 24), TRUE);
         applyWindowOpacity();
         applyGlobalHotkey(false);
-        SetTimer(hwnd_, kRefreshTimer, refreshIntervalMs_, nullptr);
         addTrayIcon();
         metrics_ = sampler_.collect();
         updateHistory();
         checkHighUsageAlerts();
         updateTrayTip();
         if (startHidden_) {
-            ShowWindow(hwnd_, SW_HIDE);
+            hidePanel();
         } else {
-            ShowWindow(hwnd_, SW_SHOW);
-            UpdateWindow(hwnd_);
+            showPanel(false);
         }
+        applyRefreshTimer();
         return true;
     }
 
@@ -1299,6 +1301,7 @@ private:
     bool highUsageAlerts_ = false;
     bool globalHotkeyEnabled_ = true;
     bool globalHotkeyRegistered_ = false;
+    bool backgroundEcoMode_ = false;
     DWORD highUsageAlertThreshold_ = kDefaultHighUsageAlertThreshold;
     UINT refreshIntervalMs_ = kDefaultRefreshIntervalMs;
     BYTE windowOpacity_ = 255;
@@ -1350,18 +1353,19 @@ private:
             return 0;
         case WM_SIZE:
             if (wParam == SIZE_MINIMIZED) {
-                ShowWindow(hwnd_, SW_HIDE);
+                hidePanel();
             } else {
                 RECT client{};
                 GetClientRect(hwnd_, &client);
                 SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, client.right, client.bottom, 24, 24), TRUE);
+                applyRefreshTimer();
             }
             return 0;
         case WM_EXITSIZEMOVE:
             saveWindowPosition();
             return 0;
         case WM_CLOSE:
-            ShowWindow(hwnd_, SW_HIDE);
+            hidePanel();
             return 0;
         case WM_HOTKEY:
             if (wParam == kHotkeyTogglePanel) {
@@ -1374,7 +1378,7 @@ private:
             } else if (LOWORD(wParam) == kMenuExit) {
                 DestroyWindow(hwnd_);
             } else if (LOWORD(wParam) == kMenuHide) {
-                ShowWindow(hwnd_, SW_HIDE);
+                hidePanel();
             } else if (LOWORD(wParam) == kMenuRefreshQuota) {
                 refreshCodexQuotaNow();
             } else if (LOWORD(wParam) == kMenuCopyStatus) {
@@ -1419,6 +1423,8 @@ private:
                 openResourceMonitor();
             } else if (LOWORD(wParam) == kMenuToggleGlobalHotkey) {
                 toggleGlobalHotkey();
+            } else if (LOWORD(wParam) == kMenuToggleBackgroundEcoMode) {
+                toggleBackgroundEcoMode();
             }
             return 0;
         case kTrayMessage:
@@ -1680,21 +1686,30 @@ private:
 
     void togglePanelVisibility() {
         if (IsWindowVisible(hwnd_)) {
-            ShowWindow(hwnd_, SW_HIDE);
+            hidePanel();
         } else {
             showPanel();
         }
     }
 
-    void showPanel() {
+    void showPanel(bool activate = true) {
         ShowWindow(hwnd_, SW_SHOW);
         ShowWindow(hwnd_, SW_RESTORE);
-        SetForegroundWindow(hwnd_);
+        applyRefreshTimer();
+        UpdateWindow(hwnd_);
+        if (activate) {
+            SetForegroundWindow(hwnd_);
+        }
+    }
+
+    void hidePanel() {
+        ShowWindow(hwnd_, SW_HIDE);
+        applyRefreshTimer();
     }
 
     void handleKeyDown(WPARAM key) {
         if (key == VK_ESCAPE) {
-            ShowWindow(hwnd_, SW_HIDE);
+            hidePanel();
         } else if (key == VK_SPACE) {
             togglePause();
         } else if (key == VK_F5) {
@@ -1721,6 +1736,7 @@ private:
         appendInfoItem(menu, L"磁盘 Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
                              L"    Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"));
         appendInfoItem(menu, L"刷新间隔 " + refreshIntervalText());
+        appendInfoItem(menu, L"后台刷新 " + backgroundRefreshText());
         appendInfoItem(menu, L"窗口透明度 " + opacityText());
         appendInfoItem(menu, L"提醒阈值 " + alertThresholdText());
         appendInfoItem(menu, trayQuotaText());
@@ -1739,6 +1755,7 @@ private:
         AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleLockPosition, L"锁定窗口位置");
         AppendMenuW(menu, MF_STRING | (highUsageAlerts_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleHighUsageAlerts, L"高占用提醒");
         AppendMenuW(menu, MF_STRING | (globalHotkeyRegistered_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleGlobalHotkey, L"全局快捷键 Ctrl+Shift+M");
+        AppendMenuW(menu, MF_STRING | (backgroundEcoMode_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleBackgroundEcoMode, L"后台低频刷新");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 1000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval1s, L"刷新间隔: 1 秒");
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 2000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval2s, L"刷新间隔: 2 秒");
@@ -1779,6 +1796,9 @@ private:
         }
         if (globalHotkeyRegistered_) {
             text += L" / 快捷键";
+        }
+        if (backgroundEcoMode_ && !IsWindowVisible(hwnd_)) {
+            text += L" / 低频刷新";
         }
         return text;
     }
@@ -1911,16 +1931,35 @@ private:
         intervalMs = sanitizeRefreshInterval(intervalMs);
         refreshIntervalMs_ = intervalMs;
         writeDwordSetting(L"RefreshIntervalMs", refreshIntervalMs_);
-        if (hwnd_) {
-            SetTimer(hwnd_, kRefreshTimer, refreshIntervalMs_, nullptr);
-        }
+        applyRefreshTimer();
         showTrayBalloon(L"MiniMonitor", L"刷新间隔已设置为 " + refreshIntervalText() + L"。");
+    }
+
+    UINT effectiveRefreshInterval() {
+        if (backgroundEcoMode_ && hwnd_ && !IsWindowVisible(hwnd_)) {
+            return kBackgroundEcoRefreshIntervalMs;
+        }
+        return refreshIntervalMs_;
+    }
+
+    void applyRefreshTimer() {
+        if (!hwnd_) {
+            return;
+        }
+        SetTimer(hwnd_, kRefreshTimer, effectiveRefreshInterval(), nullptr);
     }
 
     std::wstring refreshIntervalText() {
         wchar_t buffer[32];
         swprintf(buffer, 32, L"%u 秒", refreshIntervalMs_ / 1000);
         return buffer;
+    }
+
+    std::wstring backgroundRefreshText() {
+        if (!backgroundEcoMode_) {
+            return L"跟随前台";
+        }
+        return IsWindowVisible(hwnd_) ? L"跟随前台" : L"10 秒";
     }
 
     std::wstring opacityText() {
@@ -1991,6 +2030,13 @@ private:
         } else {
             globalHotkeyEnabled_ = false;
         }
+    }
+
+    void toggleBackgroundEcoMode() {
+        backgroundEcoMode_ = !backgroundEcoMode_;
+        writeBoolSetting(L"BackgroundEcoMode", backgroundEcoMode_);
+        applyRefreshTimer();
+        showTrayBalloon(L"MiniMonitor", backgroundEcoMode_ ? L"后台低频刷新已开启，隐藏时每 10 秒更新一次。" : L"后台低频刷新已关闭。");
     }
 
     void applyWindowOpacity() {
@@ -2138,7 +2184,7 @@ private:
         } else if (x >= client.right - 116) {
             MessageBoxW(hwnd_, L"MiniMonitor\n2 秒刷新，托盘常驻。", L"MiniMonitor", MB_OK | MB_ICONINFORMATION);
         } else if (x >= client.right - 170) {
-            ShowWindow(hwnd_, SW_HIDE);
+            hidePanel();
         }
     }
 
