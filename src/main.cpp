@@ -50,6 +50,8 @@ constexpr UINT kMenuRefreshQuota = 4;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
+constexpr wchar_t kSingletonMutexName[] = L"MiniMonitor.Singleton";
+constexpr wchar_t kSettingsKey[] = L"Software\\MiniMonitor";
 constexpr int kPanelWidth = 430;
 constexpr int kPanelHeight = 820;
 constexpr int kHistorySize = 64;
@@ -187,6 +189,14 @@ std::wstring formatOneDecimalPercent(double value) {
     wchar_t buffer[32];
     swprintf(buffer, 32, L"%.1f%%", std::max(0.0, value));
     return buffer;
+}
+
+std::wstring trimForTip(const std::wstring& text) {
+    constexpr size_t kMaxTipChars = 127;
+    if (text.size() <= kMaxTipChars) {
+        return text;
+    }
+    return text.substr(0, kMaxTipChars - 3) + L"...";
 }
 
 std::wstring utf8ToWide(const std::string& value) {
@@ -1195,16 +1205,15 @@ public:
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
         const int availableHeight = static_cast<int>(workArea.bottom - workArea.top - 32);
         const int panelHeight = std::min(kPanelHeight, std::max(560, availableHeight));
-        const int panelX = workArea.right - kPanelWidth - 16;
-        const int panelY = workArea.top + 16;
+        POINT panelPos = startupPanelPosition(workArea, panelHeight);
 
         hwnd_ = CreateWindowExW(
             WS_EX_TOOLWINDOW,
             kClassName,
             kAppTitle,
             WS_POPUP,
-            panelX,
-            panelY,
+            panelPos.x,
+            panelPos.y,
             kPanelWidth,
             panelHeight,
             nullptr,
@@ -1221,6 +1230,7 @@ public:
         addTrayIcon();
         metrics_ = sampler_.collect();
         updateHistory();
+        updateTrayTip();
         ShowWindow(hwnd_, SW_SHOW);
         UpdateWindow(hwnd_);
         return true;
@@ -1264,6 +1274,7 @@ private:
             if (wParam == kRefreshTimer) {
                 metrics_ = sampler_.collect();
                 updateHistory();
+                updateTrayTip();
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
@@ -1283,6 +1294,9 @@ private:
                 GetClientRect(hwnd_, &client);
                 SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, client.right, client.bottom, 24, 24), TRUE);
             }
+            return 0;
+        case WM_EXITSIZEMOVE:
+            saveWindowPosition();
             return 0;
         case WM_COMMAND:
             if (LOWORD(wParam) == kMenuShow) {
@@ -1316,6 +1330,63 @@ private:
         networkHistory_.push(metrics_.network);
     }
 
+    POINT startupPanelPosition(const RECT& workArea, int panelHeight) {
+        POINT fallback{workArea.right - kPanelWidth - 16, workArea.top + 16};
+        int x = 0;
+        int y = 0;
+        if (!readSavedPosition(x, y)) {
+            return fallback;
+        }
+        const int left = x;
+        const int top = y;
+        const int margin = 24;
+        if (left < workArea.left - kPanelWidth + margin || left > workArea.right - margin ||
+            top < workArea.top - panelHeight + margin || top > workArea.bottom - margin) {
+            return fallback;
+        }
+        return POINT{left, top};
+    }
+
+    bool readSavedPosition(int& x, int& y) {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+            return false;
+        }
+        DWORD rawX = 0;
+        DWORD rawY = 0;
+        DWORD type = REG_DWORD;
+        DWORD size = sizeof(DWORD);
+        const bool okX = RegQueryValueExW(key, L"WindowX", nullptr, &type, reinterpret_cast<BYTE*>(&rawX), &size) == ERROR_SUCCESS &&
+                         type == REG_DWORD;
+        type = REG_DWORD;
+        size = sizeof(DWORD);
+        const bool okY = RegQueryValueExW(key, L"WindowY", nullptr, &type, reinterpret_cast<BYTE*>(&rawY), &size) == ERROR_SUCCESS &&
+                         type == REG_DWORD;
+        RegCloseKey(key);
+        x = static_cast<int>(static_cast<LONG>(rawX));
+        y = static_cast<int>(static_cast<LONG>(rawY));
+        return okX && okY;
+    }
+
+    void saveWindowPosition() {
+        if (!hwnd_) {
+            return;
+        }
+        RECT rect{};
+        if (!GetWindowRect(hwnd_, &rect)) {
+            return;
+        }
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+            return;
+        }
+        DWORD x = static_cast<DWORD>(rect.left);
+        DWORD y = static_cast<DWORD>(rect.top);
+        RegSetValueExW(key, L"WindowX", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&x), sizeof(DWORD));
+        RegSetValueExW(key, L"WindowY", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&y), sizeof(DWORD));
+        RegCloseKey(key);
+    }
+
     void addTrayIcon() {
         NOTIFYICONDATAW nid{};
         nid.cbSize = sizeof(nid);
@@ -1324,8 +1395,21 @@ private:
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         nid.uCallbackMessage = kTrayMessage;
         nid.hIcon = icon_;
-        wcscpy_s(nid.szTip, kAppTitle);
+        wcscpy_s(nid.szTip, trayTipText().c_str());
         Shell_NotifyIconW(NIM_ADD, &nid);
+    }
+
+    void updateTrayTip() {
+        if (!hwnd_) {
+            return;
+        }
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = hwnd_;
+        nid.uID = 1;
+        nid.uFlags = NIF_TIP;
+        wcscpy_s(nid.szTip, trayTipText().c_str());
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
     void removeTrayIcon() {
@@ -1401,6 +1485,20 @@ private:
         return L"Top CPU: " + top.name + L" " + formatOneDecimalPercent(top.cpu);
     }
 
+    std::wstring trayTipText() {
+        std::wstring tip = L"CPU " + formatPercent(metrics_.cpu) +
+                           L"  GPU " + (metrics_.gpu >= 0.0 ? formatPercent(metrics_.gpu) : L"N/A") +
+                           L"\nMEM " + formatPercent(metrics_.memory) +
+                           L"  NET ↓" + formatSpeed(metrics_.netDown) +
+                           L" ↑" + formatSpeed(metrics_.netUp);
+        if (metrics_.quota.available) {
+            tip += L"\nCodex 5h " + metrics_.quota.firstUsage + L"  Weekly " + metrics_.quota.secondUsage;
+        } else {
+            tip += L"\nCodex " + metrics_.quota.status;
+        }
+        return trimForTip(tip);
+    }
+
     LRESULT hitTest(LPARAM lParam) {
         POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         ScreenToClient(hwnd_, &point);
@@ -1459,6 +1557,7 @@ private:
 
         metrics_ = sampler_.collect(true);
         updateHistory();
+        updateTrayTip();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
@@ -2019,15 +2118,35 @@ private:
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     enableDpiAwareness();
 
+    HANDLE singleton = CreateMutexW(nullptr, TRUE, kSingletonMutexName);
+    if (singleton && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND existing = FindWindowW(kClassName, kAppTitle);
+        if (existing) {
+            ShowWindow(existing, SW_SHOW);
+            ShowWindow(existing, SW_RESTORE);
+            SetForegroundWindow(existing);
+        }
+        CloseHandle(singleton);
+        return 0;
+    }
+
     GdiplusStartupInput gdiplusStartupInput;
     ULONG_PTR gdiplusToken = 0;
     if (GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr) != Ok) {
+        if (singleton) {
+            ReleaseMutex(singleton);
+            CloseHandle(singleton);
+        }
         return 1;
     }
 
     AppWindow app(instance);
     if (!app.create()) {
         GdiplusShutdown(gdiplusToken);
+        if (singleton) {
+            ReleaseMutex(singleton);
+            CloseHandle(singleton);
+        }
         return 1;
     }
 
@@ -2038,5 +2157,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     GdiplusShutdown(gdiplusToken);
+    if (singleton) {
+        ReleaseMutex(singleton);
+        CloseHandle(singleton);
+    }
     return static_cast<int>(message.wParam);
 }
