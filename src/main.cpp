@@ -47,11 +47,17 @@ constexpr UINT kMenuShow = 1;
 constexpr UINT kMenuExit = 2;
 constexpr UINT kMenuHide = 3;
 constexpr UINT kMenuRefreshQuota = 4;
+constexpr UINT kMenuCopyStatus = 5;
+constexpr UINT kMenuToggleStartHidden = 6;
+constexpr UINT kMenuToggleAutoStart = 7;
+constexpr UINT kMenuResetPosition = 8;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
 constexpr wchar_t kSingletonMutexName[] = L"MiniMonitor.Singleton";
 constexpr wchar_t kSettingsKey[] = L"Software\\MiniMonitor";
+constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kRunValueName[] = L"MiniMonitor";
 constexpr int kPanelWidth = 430;
 constexpr int kPanelHeight = 820;
 constexpr int kHistorySize = 64;
@@ -1205,6 +1211,7 @@ public:
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
         const int availableHeight = static_cast<int>(workArea.bottom - workArea.top - 32);
         const int panelHeight = std::min(kPanelHeight, std::max(560, availableHeight));
+        startHidden_ = readBoolSetting(L"StartHidden", false);
         POINT panelPos = startupPanelPosition(workArea, panelHeight);
 
         hwnd_ = CreateWindowExW(
@@ -1231,8 +1238,12 @@ public:
         metrics_ = sampler_.collect();
         updateHistory();
         updateTrayTip();
-        ShowWindow(hwnd_, SW_SHOW);
-        UpdateWindow(hwnd_);
+        if (startHidden_) {
+            ShowWindow(hwnd_, SW_HIDE);
+        } else {
+            ShowWindow(hwnd_, SW_SHOW);
+            UpdateWindow(hwnd_);
+        }
         return true;
     }
 
@@ -1248,6 +1259,7 @@ private:
     SampleHistory memoryHistory_;
     SampleHistory diskHistory_;
     SampleHistory networkHistory_;
+    bool startHidden_ = false;
 
     static AppWindow* fromWindow(HWND hwnd) {
         return reinterpret_cast<AppWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -1307,6 +1319,14 @@ private:
                 ShowWindow(hwnd_, SW_HIDE);
             } else if (LOWORD(wParam) == kMenuRefreshQuota) {
                 refreshCodexQuotaNow();
+            } else if (LOWORD(wParam) == kMenuCopyStatus) {
+                copyStatusToClipboard();
+            } else if (LOWORD(wParam) == kMenuToggleStartHidden) {
+                toggleStartHidden();
+            } else if (LOWORD(wParam) == kMenuToggleAutoStart) {
+                toggleAutoStart();
+            } else if (LOWORD(wParam) == kMenuResetPosition) {
+                resetWindowPosition();
             }
             return 0;
         case kTrayMessage:
@@ -1328,6 +1348,90 @@ private:
         memoryHistory_.push(metrics_.memory);
         diskHistory_.push(metrics_.disk);
         networkHistory_.push(metrics_.network);
+    }
+
+    bool readBoolSetting(const wchar_t* name, bool fallback) {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+            return fallback;
+        }
+        DWORD raw = fallback ? 1 : 0;
+        DWORD type = REG_DWORD;
+        DWORD size = sizeof(DWORD);
+        const bool ok = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(&raw), &size) == ERROR_SUCCESS &&
+                        type == REG_DWORD;
+        RegCloseKey(key);
+        return ok ? raw != 0 : fallback;
+    }
+
+    void writeBoolSetting(const wchar_t* name, bool value) {
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+            return;
+        }
+        DWORD raw = value ? 1 : 0;
+        RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&raw), sizeof(DWORD));
+        RegCloseKey(key);
+    }
+
+    std::wstring executablePath() {
+        std::wstring path(MAX_PATH, L'\0');
+        DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+        if (length == 0) {
+            return L"";
+        }
+        while (length >= path.size()) {
+            path.assign(path.size() * 2, L'\0');
+            length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+            if (length == 0) {
+                return L"";
+            }
+        }
+        path.resize(length);
+        return path;
+    }
+
+    std::wstring autoStartCommand() {
+        std::wstring path = executablePath();
+        if (path.empty()) {
+            return L"";
+        }
+        return L"\"" + path + L"\"";
+    }
+
+    bool isAutoStartEnabled() {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+            return false;
+        }
+        wchar_t buffer[2048]{};
+        DWORD type = REG_SZ;
+        DWORD size = sizeof(buffer);
+        const bool ok = RegQueryValueExW(key, kRunValueName, nullptr, &type, reinterpret_cast<BYTE*>(buffer), &size) ==
+                            ERROR_SUCCESS &&
+                        type == REG_SZ && buffer[0] != L'\0';
+        RegCloseKey(key);
+        return ok;
+    }
+
+    bool setAutoStart(bool enabled) {
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+            return false;
+        }
+
+        bool ok = false;
+        if (enabled) {
+            const std::wstring command = autoStartCommand();
+            ok = !command.empty() &&
+                 RegSetValueExW(key, kRunValueName, 0, REG_SZ, reinterpret_cast<const BYTE*>(command.c_str()),
+                                static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
+        } else {
+            const LSTATUS status = RegDeleteValueW(key, kRunValueName);
+            ok = status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+        }
+        RegCloseKey(key);
+        return ok;
     }
 
     POINT startupPanelPosition(const RECT& workArea, int panelHeight) {
@@ -1446,6 +1550,7 @@ private:
     void populateTrayMenu(HMENU menu) {
         metrics_ = sampler_.collect();
         updateHistory();
+        updateTrayTip();
 
         appendInfoItem(menu, IsWindowVisible(hwnd_) ? L"状态: 面板显示中" : L"状态: 后台运行中");
         appendInfoItem(menu, L"CPU " + formatPercent(metrics_.cpu) +
@@ -1461,13 +1566,122 @@ private:
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuShow, L"显示面板");
         AppendMenuW(menu, MF_STRING, kMenuHide, L"隐藏到后台");
+        AppendMenuW(menu, MF_STRING, kMenuCopyStatus, L"复制当前状态");
         AppendMenuW(menu, MF_STRING, kMenuRefreshQuota, L"刷新 Codex 额度");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (startHidden_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleStartHidden, L"启动时隐藏面板");
+        AppendMenuW(menu, MF_STRING | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAutoStart, L"开机自启");
+        AppendMenuW(menu, MF_STRING, kMenuResetPosition, L"重置窗口位置");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuExit, L"退出");
     }
 
     void appendInfoItem(HMENU menu, const std::wstring& text) {
         AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, text.c_str());
+    }
+
+    void showTrayBalloon(const std::wstring& title, const std::wstring& message) {
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = hwnd_;
+        nid.uID = 1;
+        nid.uFlags = NIF_INFO;
+        wcscpy_s(nid.szInfoTitle, title.c_str());
+        wcscpy_s(nid.szInfo, message.c_str());
+        nid.dwInfoFlags = NIIF_INFO;
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+
+    std::wstring statusSummaryText() {
+        std::wstring text = L"MiniMonitor 当前状态\r\n";
+        text += L"CPU: " + formatPercent(metrics_.cpu);
+        if (!metrics_.topCpu.empty()) {
+            text += L"  Top: " + metrics_.topCpu.front().name + L" " + formatOneDecimalPercent(metrics_.topCpu.front().cpu);
+        }
+        text += L"\r\nGPU: " + (metrics_.gpu >= 0.0 ? formatPercent(metrics_.gpu) : L"N/A");
+        if (!metrics_.topGpu.empty()) {
+            text += L"  Top: " + metrics_.topGpu.front().name + L" " + formatOneDecimalPercent(metrics_.topGpu.front().gpu);
+        }
+        text += L"\r\nMemory: " + formatPercent(metrics_.memory) + L"  " +
+                formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
+                formatBytes(static_cast<double>(metrics_.memoryTotal));
+        if (!metrics_.topMemory.empty()) {
+            text += L"  Top: " + metrics_.topMemory.front().name + L" " +
+                    formatBytes(static_cast<double>(metrics_.topMemory.front().memory));
+        }
+        text += L"\r\nNetwork: Down " + formatSpeed(metrics_.netDown) + L"  Up " + formatSpeed(metrics_.netUp);
+        text += L"\r\nDisk: Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
+                L"  Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A");
+        text += L"\r\n" + trayQuotaText();
+        return text;
+    }
+
+    bool setClipboardText(const std::wstring& text) {
+        if (!OpenClipboard(hwnd_)) {
+            return false;
+        }
+        EmptyClipboard();
+        const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (!memory) {
+            CloseClipboard();
+            return false;
+        }
+        void* locked = GlobalLock(memory);
+        if (!locked) {
+            GlobalFree(memory);
+            CloseClipboard();
+            return false;
+        }
+        CopyMemory(locked, text.c_str(), bytes);
+        GlobalUnlock(memory);
+        if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+            GlobalFree(memory);
+            CloseClipboard();
+            return false;
+        }
+        CloseClipboard();
+        return true;
+    }
+
+    void copyStatusToClipboard() {
+        metrics_ = sampler_.collect();
+        updateHistory();
+        updateTrayTip();
+        if (setClipboardText(statusSummaryText())) {
+            showTrayBalloon(L"MiniMonitor", L"当前状态已复制到剪贴板。");
+        } else {
+            showTrayBalloon(L"MiniMonitor", L"复制失败，剪贴板可能正被占用。");
+        }
+    }
+
+    void toggleStartHidden() {
+        startHidden_ = !startHidden_;
+        writeBoolSetting(L"StartHidden", startHidden_);
+        showTrayBalloon(L"MiniMonitor", startHidden_ ? L"下次启动将直接进入托盘。" : L"下次启动将显示面板。");
+    }
+
+    void toggleAutoStart() {
+        const bool enabled = !isAutoStartEnabled();
+        if (setAutoStart(enabled)) {
+            showTrayBalloon(L"MiniMonitor", enabled ? L"已开启开机自启。" : L"已关闭开机自启。");
+        } else {
+            showTrayBalloon(L"MiniMonitor", L"开机自启设置失败。");
+        }
+    }
+
+    void resetWindowPosition() {
+        RECT workArea{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+        RECT rect{};
+        GetWindowRect(hwnd_, &rect);
+        const int height = std::max(560L, rect.bottom - rect.top);
+        const int x = workArea.right - kPanelWidth - 16;
+        const int y = workArea.top + 16;
+        MoveWindow(hwnd_, x, y, kPanelWidth, height, TRUE);
+        saveWindowPosition();
+        showPanel();
+        showTrayBalloon(L"MiniMonitor", L"窗口已回到屏幕右侧。");
     }
 
     std::wstring trayQuotaText() {
