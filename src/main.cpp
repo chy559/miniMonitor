@@ -68,6 +68,7 @@ constexpr UINT kMenuAlertThreshold80 = 21;
 constexpr UINT kMenuAlertThreshold90 = 22;
 constexpr UINT kMenuAlertThreshold95 = 23;
 constexpr UINT kMenuOpenResourceMonitor = 24;
+constexpr UINT kMenuToggleGlobalHotkey = 25;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -78,6 +79,7 @@ constexpr wchar_t kRunValueName[] = L"MiniMonitor";
 constexpr int kPanelWidth = 430;
 constexpr int kPanelHeight = 820;
 constexpr int kHistorySize = 64;
+constexpr int kHotkeyTogglePanel = 2001;
 constexpr UINT kDefaultRefreshIntervalMs = 2000;
 constexpr DWORD kDefaultHighUsageAlertThreshold = 90;
 constexpr ULONGLONG kHighUsageAlertCooldownMs = 5 * 60 * 1000;
@@ -1236,6 +1238,7 @@ public:
         paused_ = readBoolSetting(L"Paused", false);
         lockPosition_ = readBoolSetting(L"LockPosition", false);
         highUsageAlerts_ = readBoolSetting(L"HighUsageAlerts", false);
+        globalHotkeyEnabled_ = readBoolSetting(L"GlobalHotkeyEnabled", true);
         highUsageAlertThreshold_ = sanitizeAlertThreshold(readDwordSetting(L"HighUsageAlertThreshold", kDefaultHighUsageAlertThreshold));
         refreshIntervalMs_ = sanitizeRefreshInterval(readDwordSetting(L"RefreshIntervalMs", kDefaultRefreshIntervalMs));
         windowOpacity_ = sanitizeWindowOpacity(readDwordSetting(L"WindowOpacity", 255));
@@ -1261,6 +1264,7 @@ public:
 
         SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, kPanelWidth, panelHeight, 24, 24), TRUE);
         applyWindowOpacity();
+        applyGlobalHotkey(false);
         SetTimer(hwnd_, kRefreshTimer, refreshIntervalMs_, nullptr);
         addTrayIcon();
         metrics_ = sampler_.collect();
@@ -1293,6 +1297,8 @@ private:
     bool paused_ = false;
     bool lockPosition_ = false;
     bool highUsageAlerts_ = false;
+    bool globalHotkeyEnabled_ = true;
+    bool globalHotkeyRegistered_ = false;
     DWORD highUsageAlertThreshold_ = kDefaultHighUsageAlertThreshold;
     UINT refreshIntervalMs_ = kDefaultRefreshIntervalMs;
     BYTE windowOpacity_ = 255;
@@ -1354,6 +1360,14 @@ private:
         case WM_EXITSIZEMOVE:
             saveWindowPosition();
             return 0;
+        case WM_CLOSE:
+            ShowWindow(hwnd_, SW_HIDE);
+            return 0;
+        case WM_HOTKEY:
+            if (wParam == kHotkeyTogglePanel) {
+                togglePanelVisibility();
+            }
+            return 0;
         case WM_COMMAND:
             if (LOWORD(wParam) == kMenuShow) {
                 showPanel();
@@ -1403,6 +1417,8 @@ private:
                 setHighUsageAlertThreshold(95);
             } else if (LOWORD(wParam) == kMenuOpenResourceMonitor) {
                 openResourceMonitor();
+            } else if (LOWORD(wParam) == kMenuToggleGlobalHotkey) {
+                toggleGlobalHotkey();
             }
             return 0;
         case kTrayMessage:
@@ -1410,6 +1426,7 @@ private:
             return 0;
         case WM_DESTROY:
             KillTimer(hwnd_, kRefreshTimer);
+            unregisterGlobalHotkey();
             removeTrayIcon();
             PostQuitMessage(0);
             return 0;
@@ -1721,6 +1738,7 @@ private:
         AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAlwaysOnTop, L"窗口置顶");
         AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleLockPosition, L"锁定窗口位置");
         AppendMenuW(menu, MF_STRING | (highUsageAlerts_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleHighUsageAlerts, L"高占用提醒");
+        AppendMenuW(menu, MF_STRING | (globalHotkeyRegistered_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleGlobalHotkey, L"全局快捷键 Ctrl+Shift+M");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 1000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval1s, L"刷新间隔: 1 秒");
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 2000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval2s, L"刷新间隔: 2 秒");
@@ -1758,6 +1776,9 @@ private:
         }
         if (highUsageAlerts_) {
             text += L" / 高占用提醒";
+        }
+        if (globalHotkeyRegistered_) {
+            text += L" / 快捷键";
         }
         return text;
     }
@@ -1932,6 +1953,43 @@ private:
         HINSTANCE result = ShellExecuteW(hwnd_, L"open", L"resmon.exe", nullptr, nullptr, SW_SHOWNORMAL);
         if (reinterpret_cast<INT_PTR>(result) <= 32) {
             showTrayBalloon(L"MiniMonitor", L"无法打开资源监视器。");
+        }
+    }
+
+    bool applyGlobalHotkey(bool announce) {
+        unregisterGlobalHotkey();
+        if (!globalHotkeyEnabled_ || !hwnd_) {
+            return false;
+        }
+
+        globalHotkeyRegistered_ = RegisterHotKey(hwnd_, kHotkeyTogglePanel, MOD_CONTROL | MOD_SHIFT, L'M') != FALSE;
+        if (announce) {
+            showTrayBalloon(L"MiniMonitor", globalHotkeyRegistered_ ? L"全局快捷键 Ctrl+Shift+M 已开启。" : L"全局快捷键注册失败，可能已被其他程序占用。");
+        }
+        return globalHotkeyRegistered_;
+    }
+
+    void unregisterGlobalHotkey() {
+        if (globalHotkeyRegistered_ && hwnd_) {
+            UnregisterHotKey(hwnd_, kHotkeyTogglePanel);
+        }
+        globalHotkeyRegistered_ = false;
+    }
+
+    void toggleGlobalHotkey() {
+        if (globalHotkeyRegistered_) {
+            unregisterGlobalHotkey();
+            globalHotkeyEnabled_ = false;
+            writeBoolSetting(L"GlobalHotkeyEnabled", false);
+            showTrayBalloon(L"MiniMonitor", L"全局快捷键已关闭。");
+            return;
+        }
+
+        globalHotkeyEnabled_ = true;
+        if (applyGlobalHotkey(true)) {
+            writeBoolSetting(L"GlobalHotkeyEnabled", true);
+        } else {
+            globalHotkeyEnabled_ = false;
         }
     }
 
