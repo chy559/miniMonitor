@@ -21,6 +21,7 @@
 #include <pdh.h>
 #include <pdhmsg.h>
 #include <winhttp.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <array>
@@ -53,6 +54,11 @@ constexpr UINT kMenuToggleAutoStart = 7;
 constexpr UINT kMenuResetPosition = 8;
 constexpr UINT kMenuToggleAlwaysOnTop = 9;
 constexpr UINT kMenuTogglePause = 10;
+constexpr UINT kMenuRefreshNow = 11;
+constexpr UINT kMenuRefreshInterval1s = 12;
+constexpr UINT kMenuRefreshInterval2s = 13;
+constexpr UINT kMenuRefreshInterval5s = 14;
+constexpr UINT kMenuOpenTaskManager = 15;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -63,6 +69,7 @@ constexpr wchar_t kRunValueName[] = L"MiniMonitor";
 constexpr int kPanelWidth = 430;
 constexpr int kPanelHeight = 820;
 constexpr int kHistorySize = 64;
+constexpr UINT kDefaultRefreshIntervalMs = 2000;
 
 struct SampleHistory {
     std::deque<double> values;
@@ -1216,6 +1223,7 @@ public:
         startHidden_ = readBoolSetting(L"StartHidden", false);
         alwaysOnTop_ = readBoolSetting(L"AlwaysOnTop", false);
         paused_ = readBoolSetting(L"Paused", false);
+        refreshIntervalMs_ = sanitizeRefreshInterval(readDwordSetting(L"RefreshIntervalMs", kDefaultRefreshIntervalMs));
         POINT panelPos = startupPanelPosition(workArea, panelHeight);
 
         hwnd_ = CreateWindowExW(
@@ -1237,7 +1245,7 @@ public:
         }
 
         SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, kPanelWidth, panelHeight, 24, 24), TRUE);
-        SetTimer(hwnd_, kRefreshTimer, 2000, nullptr);
+        SetTimer(hwnd_, kRefreshTimer, refreshIntervalMs_, nullptr);
         addTrayIcon();
         metrics_ = sampler_.collect();
         updateHistory();
@@ -1266,6 +1274,7 @@ private:
     bool startHidden_ = false;
     bool alwaysOnTop_ = false;
     bool paused_ = false;
+    UINT refreshIntervalMs_ = kDefaultRefreshIntervalMs;
 
     static AppWindow* fromWindow(HWND hwnd) {
         return reinterpret_cast<AppWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -1343,6 +1352,16 @@ private:
                 toggleAlwaysOnTop();
             } else if (LOWORD(wParam) == kMenuTogglePause) {
                 togglePause();
+            } else if (LOWORD(wParam) == kMenuRefreshNow) {
+                refreshNow(true);
+            } else if (LOWORD(wParam) == kMenuRefreshInterval1s) {
+                setRefreshInterval(1000);
+            } else if (LOWORD(wParam) == kMenuRefreshInterval2s) {
+                setRefreshInterval(2000);
+            } else if (LOWORD(wParam) == kMenuRefreshInterval5s) {
+                setRefreshInterval(5000);
+            } else if (LOWORD(wParam) == kMenuOpenTaskManager) {
+                openTaskManager();
             }
             return 0;
         case kTrayMessage:
@@ -1388,6 +1407,36 @@ private:
         DWORD raw = value ? 1 : 0;
         RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&raw), sizeof(DWORD));
         RegCloseKey(key);
+    }
+
+    DWORD readDwordSetting(const wchar_t* name, DWORD fallback) {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+            return fallback;
+        }
+        DWORD raw = fallback;
+        DWORD type = REG_DWORD;
+        DWORD size = sizeof(DWORD);
+        const bool ok = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(&raw), &size) == ERROR_SUCCESS &&
+                        type == REG_DWORD;
+        RegCloseKey(key);
+        return ok ? raw : fallback;
+    }
+
+    void writeDwordSetting(const wchar_t* name, DWORD value) {
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+            return;
+        }
+        RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(DWORD));
+        RegCloseKey(key);
+    }
+
+    UINT sanitizeRefreshInterval(DWORD value) {
+        if (value == 1000 || value == 2000 || value == 5000) {
+            return static_cast<UINT>(value);
+        }
+        return kDefaultRefreshIntervalMs;
     }
 
     std::wstring executablePath() {
@@ -1576,6 +1625,8 @@ private:
             ShowWindow(hwnd_, SW_HIDE);
         } else if (key == VK_SPACE) {
             togglePause();
+        } else if (key == VK_F5) {
+            refreshNow(true);
         } else if ((key == L'C' || key == L'c') && (GetKeyState(VK_CONTROL) & 0x8000)) {
             copyStatusToClipboard();
         }
@@ -1597,16 +1648,24 @@ private:
         appendInfoItem(menu, L"网络 ↓ " + formatSpeed(metrics_.netDown) + L"    ↑ " + formatSpeed(metrics_.netUp));
         appendInfoItem(menu, L"磁盘 Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
                              L"    Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"));
+        appendInfoItem(menu, L"刷新间隔 " + refreshIntervalText());
         appendInfoItem(menu, trayQuotaText());
         appendInfoItem(menu, trayTopProcessText());
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuShow, L"显示面板");
         AppendMenuW(menu, MF_STRING, kMenuHide, L"隐藏到后台");
+        AppendMenuW(menu, MF_STRING, kMenuRefreshNow, L"立即刷新");
         AppendMenuW(menu, MF_STRING, kMenuCopyStatus, L"复制当前状态");
         AppendMenuW(menu, MF_STRING, kMenuRefreshQuota, L"刷新 Codex 额度");
+        AppendMenuW(menu, MF_STRING, kMenuOpenTaskManager, L"打开任务管理器");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (paused_ ? MF_CHECKED : MF_UNCHECKED), kMenuTogglePause, paused_ ? L"继续刷新" : L"暂停刷新");
         AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAlwaysOnTop, L"窗口置顶");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 1000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval1s, L"刷新间隔: 1 秒");
+        AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 2000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval2s, L"刷新间隔: 2 秒");
+        AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 5000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval5s, L"刷新间隔: 5 秒");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (startHidden_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleStartHidden, L"启动时隐藏面板");
         AppendMenuW(menu, MF_STRING | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAutoStart, L"开机自启");
         AppendMenuW(menu, MF_STRING, kMenuResetPosition, L"重置窗口位置");
@@ -1701,6 +1760,39 @@ private:
             showTrayBalloon(L"MiniMonitor", L"当前状态已复制到剪贴板。");
         } else {
             showTrayBalloon(L"MiniMonitor", L"复制失败，剪贴板可能正被占用。");
+        }
+    }
+
+    void refreshNow(bool showFeedback) {
+        metrics_ = sampler_.collect();
+        updateHistory();
+        updateTrayTip();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        if (showFeedback) {
+            showTrayBalloon(L"MiniMonitor", L"状态已刷新。");
+        }
+    }
+
+    void setRefreshInterval(UINT intervalMs) {
+        intervalMs = sanitizeRefreshInterval(intervalMs);
+        refreshIntervalMs_ = intervalMs;
+        writeDwordSetting(L"RefreshIntervalMs", refreshIntervalMs_);
+        if (hwnd_) {
+            SetTimer(hwnd_, kRefreshTimer, refreshIntervalMs_, nullptr);
+        }
+        showTrayBalloon(L"MiniMonitor", L"刷新间隔已设置为 " + refreshIntervalText() + L"。");
+    }
+
+    std::wstring refreshIntervalText() {
+        wchar_t buffer[32];
+        swprintf(buffer, 32, L"%u 秒", refreshIntervalMs_ / 1000);
+        return buffer;
+    }
+
+    void openTaskManager() {
+        HINSTANCE result = ShellExecuteW(hwnd_, L"open", L"taskmgr.exe", nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<INT_PTR>(result) <= 32) {
+            showTrayBalloon(L"MiniMonitor", L"无法打开任务管理器。");
         }
     }
 
