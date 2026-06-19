@@ -47,6 +47,7 @@ constexpr UINT kMenuShow = 1;
 constexpr UINT kMenuExit = 2;
 constexpr UINT kMenuHide = 3;
 constexpr UINT kMenuRefreshQuota = 4;
+constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
 constexpr int kPanelWidth = 430;
@@ -531,6 +532,12 @@ HICON createAppIcon() {
     DeleteObject(color);
     DeleteObject(mask);
     return icon;
+}
+
+HICON loadAppIcon(HINSTANCE instance) {
+    auto icon = reinterpret_cast<HICON>(
+        LoadImageW(instance, MAKEINTRESOURCEW(kAppIconResource), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
+    return icon ? icon : createAppIcon();
 }
 
 class SystemSampler {
@@ -1160,7 +1167,7 @@ private:
 
 class AppWindow {
 public:
-    AppWindow(HINSTANCE instance) : instance_(instance), icon_(createAppIcon()) {}
+    AppWindow(HINSTANCE instance) : instance_(instance), icon_(loadAppIcon(instance)) {}
 
     ~AppWindow() {
         removeTrayIcon();
