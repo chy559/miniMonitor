@@ -43,6 +43,10 @@ namespace {
 
 constexpr UINT_PTR kRefreshTimer = 1001;
 constexpr UINT kTrayMessage = WM_APP + 42;
+constexpr UINT kMenuShow = 1;
+constexpr UINT kMenuExit = 2;
+constexpr UINT kMenuHide = 3;
+constexpr UINT kMenuRefreshQuota = 4;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
 constexpr int kPanelWidth = 430;
@@ -1264,12 +1268,14 @@ private:
             }
             return 0;
         case WM_COMMAND:
-            if (LOWORD(wParam) == 1) {
-                ShowWindow(hwnd_, SW_SHOW);
-                ShowWindow(hwnd_, SW_RESTORE);
-                SetForegroundWindow(hwnd_);
-            } else if (LOWORD(wParam) == 2) {
+            if (LOWORD(wParam) == kMenuShow) {
+                showPanel();
+            } else if (LOWORD(wParam) == kMenuExit) {
                 DestroyWindow(hwnd_);
+            } else if (LOWORD(wParam) == kMenuHide) {
+                ShowWindow(hwnd_, SW_HIDE);
+            } else if (LOWORD(wParam) == kMenuRefreshQuota) {
+                refreshCodexQuotaNow();
             }
             return 0;
         case kTrayMessage:
@@ -1318,20 +1324,64 @@ private:
 
     void handleTrayMessage(LPARAM lParam) {
         if (lParam == WM_LBUTTONUP) {
-            ShowWindow(hwnd_, SW_SHOW);
-            ShowWindow(hwnd_, SW_RESTORE);
-            SetForegroundWindow(hwnd_);
+            showPanel();
         } else if (lParam == WM_RBUTTONUP) {
             POINT point{};
             GetCursorPos(&point);
             HMENU menu = CreatePopupMenu();
-            AppendMenuW(menu, MF_STRING, 1, L"显示 MiniMonitor");
-            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(menu, MF_STRING, 2, L"退出");
+            populateTrayMenu(menu);
             SetForegroundWindow(hwnd_);
             TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
         }
+    }
+
+    void showPanel() {
+        ShowWindow(hwnd_, SW_SHOW);
+        ShowWindow(hwnd_, SW_RESTORE);
+        SetForegroundWindow(hwnd_);
+    }
+
+    void populateTrayMenu(HMENU menu) {
+        metrics_ = sampler_.collect();
+        updateHistory();
+
+        appendInfoItem(menu, IsWindowVisible(hwnd_) ? L"状态: 面板显示中" : L"状态: 后台运行中");
+        appendInfoItem(menu, L"CPU " + formatPercent(metrics_.cpu) +
+                             L"    GPU " + (metrics_.gpu >= 0.0 ? formatPercent(metrics_.gpu) : L"N/A"));
+        appendInfoItem(menu, L"内存 " + formatPercent(metrics_.memory) + L"  " +
+                             formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
+                             formatBytes(static_cast<double>(metrics_.memoryTotal)));
+        appendInfoItem(menu, L"网络 ↓ " + formatSpeed(metrics_.netDown) + L"    ↑ " + formatSpeed(metrics_.netUp));
+        appendInfoItem(menu, L"磁盘 Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
+                             L"    Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"));
+        appendInfoItem(menu, trayQuotaText());
+        appendInfoItem(menu, trayTopProcessText());
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kMenuShow, L"显示面板");
+        AppendMenuW(menu, MF_STRING, kMenuHide, L"隐藏到后台");
+        AppendMenuW(menu, MF_STRING, kMenuRefreshQuota, L"刷新 Codex 额度");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kMenuExit, L"退出");
+    }
+
+    void appendInfoItem(HMENU menu, const std::wstring& text) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, text.c_str());
+    }
+
+    std::wstring trayQuotaText() {
+        if (!metrics_.quota.available) {
+            return L"Codex: " + metrics_.quota.status;
+        }
+        return L"Codex: 5h " + metrics_.quota.firstUsage + L"    Weekly " + metrics_.quota.secondUsage;
+    }
+
+    std::wstring trayTopProcessText() {
+        if (metrics_.topCpu.empty()) {
+            return L"Top CPU: N/A";
+        }
+        const auto& top = metrics_.topCpu.front();
+        return L"Top CPU: " + top.name + L" " + formatOneDecimalPercent(top.cpu);
     }
 
     LRESULT hitTest(LPARAM lParam) {
@@ -1433,6 +1483,7 @@ private:
         drawBackground(g, width, height);
         drawHeader(g, width);
         drawCards(g, width, height);
+        drawWindowFrame(g, width, height);
 
         BitBlt(hdc, 0, 0, width, height, memoryDc, 0, 0, SRCCOPY);
         SelectObject(memoryDc, oldBitmap);
@@ -1455,6 +1506,18 @@ private:
         g.FillEllipse(&washA, -60, -80, 250, 220);
         g.FillEllipse(&washB, width - 150, 42, 210, 240);
         g.FillEllipse(&washC, 96, height - 160, 260, 220);
+    }
+
+    void drawWindowFrame(Graphics& g, int width, int height) {
+        RectF outer(0.5f, 0.5f, static_cast<REAL>(width) - 1.0f, static_cast<REAL>(height) - 1.0f);
+        auto outerPath = roundedRect(outer, 12.0f);
+        Pen outerPen(Color(150, 255, 255, 255), 1.0f);
+        g.DrawPath(&outerPen, outerPath.get());
+
+        RectF inner(1.5f, 1.5f, static_cast<REAL>(width) - 3.0f, static_cast<REAL>(height) - 3.0f);
+        auto innerPath = roundedRect(inner, 11.0f);
+        Pen innerPen(Color(42, 96, 82, 112), 1.0f);
+        g.DrawPath(&innerPen, innerPath.get());
     }
 
     void drawHeader(Graphics& g, int) {
@@ -1506,11 +1569,20 @@ private:
     }
 
     void drawPanel(Graphics& g, RectF rect) {
+        RectF shadowRect(rect.X, rect.Y + 2.0f, rect.Width, rect.Height);
+        auto shadowPath = roundedRect(shadowRect, 8.0f);
+        SolidBrush shadow(Color(24, 72, 62, 88));
+        g.FillPath(&shadow, shadowPath.get());
+
         auto path = roundedRect(rect, 8.0f);
-        SolidBrush fill(Color(242, 250, 246, 252));
-        Pen border(Color(170, 186, 174, 194), 1.0f);
+        SolidBrush fill(Color(236, 255, 252, 255));
+        Pen border(Color(78, 255, 255, 255), 1.0f);
+        Pen edge(Color(44, 130, 114, 150), 1.0f);
         g.FillPath(&fill, path.get());
         g.DrawPath(&border, path.get());
+        RectF inset(rect.X + 0.5f, rect.Y + 0.5f, rect.Width - 1.0f, rect.Height - 1.0f);
+        auto insetPath = roundedRect(inset, 7.5f);
+        g.DrawPath(&edge, insetPath.get());
     }
 
     void drawMetricCard(Graphics& g, RectF rect, const std::wstring& title, const std::wstring& value,
