@@ -51,6 +51,8 @@ constexpr UINT kMenuCopyStatus = 5;
 constexpr UINT kMenuToggleStartHidden = 6;
 constexpr UINT kMenuToggleAutoStart = 7;
 constexpr UINT kMenuResetPosition = 8;
+constexpr UINT kMenuToggleAlwaysOnTop = 9;
+constexpr UINT kMenuTogglePause = 10;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -1212,10 +1214,12 @@ public:
         const int availableHeight = static_cast<int>(workArea.bottom - workArea.top - 32);
         const int panelHeight = std::min(kPanelHeight, std::max(560, availableHeight));
         startHidden_ = readBoolSetting(L"StartHidden", false);
+        alwaysOnTop_ = readBoolSetting(L"AlwaysOnTop", false);
+        paused_ = readBoolSetting(L"Paused", false);
         POINT panelPos = startupPanelPosition(workArea, panelHeight);
 
         hwnd_ = CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            WS_EX_TOOLWINDOW | (alwaysOnTop_ ? WS_EX_TOPMOST : 0),
             kClassName,
             kAppTitle,
             WS_POPUP,
@@ -1260,6 +1264,8 @@ private:
     SampleHistory diskHistory_;
     SampleHistory networkHistory_;
     bool startHidden_ = false;
+    bool alwaysOnTop_ = false;
+    bool paused_ = false;
 
     static AppWindow* fromWindow(HWND hwnd) {
         return reinterpret_cast<AppWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -1284,6 +1290,9 @@ private:
         switch (message) {
         case WM_TIMER:
             if (wParam == kRefreshTimer) {
+                if (paused_) {
+                    return 0;
+                }
                 metrics_ = sampler_.collect();
                 updateHistory();
                 updateTrayTip();
@@ -1297,6 +1306,9 @@ private:
             return hitTest(lParam);
         case WM_LBUTTONUP:
             handleClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            return 0;
+        case WM_KEYDOWN:
+            handleKeyDown(wParam);
             return 0;
         case WM_SIZE:
             if (wParam == SIZE_MINIMIZED) {
@@ -1327,6 +1339,10 @@ private:
                 toggleAutoStart();
             } else if (LOWORD(wParam) == kMenuResetPosition) {
                 resetWindowPosition();
+            } else if (LOWORD(wParam) == kMenuToggleAlwaysOnTop) {
+                toggleAlwaysOnTop();
+            } else if (LOWORD(wParam) == kMenuTogglePause) {
+                togglePause();
             }
             return 0;
         case kTrayMessage:
@@ -1529,7 +1545,7 @@ private:
 
     void handleTrayMessage(LPARAM lParam) {
         if (lParam == WM_LBUTTONUP) {
-            showPanel();
+            togglePanelVisibility();
         } else if (lParam == WM_RBUTTONUP) {
             POINT point{};
             GetCursorPos(&point);
@@ -1541,18 +1557,38 @@ private:
         }
     }
 
+    void togglePanelVisibility() {
+        if (IsWindowVisible(hwnd_)) {
+            ShowWindow(hwnd_, SW_HIDE);
+        } else {
+            showPanel();
+        }
+    }
+
     void showPanel() {
         ShowWindow(hwnd_, SW_SHOW);
         ShowWindow(hwnd_, SW_RESTORE);
         SetForegroundWindow(hwnd_);
     }
 
-    void populateTrayMenu(HMENU menu) {
-        metrics_ = sampler_.collect();
-        updateHistory();
-        updateTrayTip();
+    void handleKeyDown(WPARAM key) {
+        if (key == VK_ESCAPE) {
+            ShowWindow(hwnd_, SW_HIDE);
+        } else if (key == VK_SPACE) {
+            togglePause();
+        } else if ((key == L'C' || key == L'c') && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            copyStatusToClipboard();
+        }
+    }
 
-        appendInfoItem(menu, IsWindowVisible(hwnd_) ? L"状态: 面板显示中" : L"状态: 后台运行中");
+    void populateTrayMenu(HMENU menu) {
+        if (!paused_) {
+            metrics_ = sampler_.collect();
+            updateHistory();
+            updateTrayTip();
+        }
+
+        appendInfoItem(menu, windowStateText());
         appendInfoItem(menu, L"CPU " + formatPercent(metrics_.cpu) +
                              L"    GPU " + (metrics_.gpu >= 0.0 ? formatPercent(metrics_.gpu) : L"N/A"));
         appendInfoItem(menu, L"内存 " + formatPercent(metrics_.memory) + L"  " +
@@ -1569,6 +1605,8 @@ private:
         AppendMenuW(menu, MF_STRING, kMenuCopyStatus, L"复制当前状态");
         AppendMenuW(menu, MF_STRING, kMenuRefreshQuota, L"刷新 Codex 额度");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (paused_ ? MF_CHECKED : MF_UNCHECKED), kMenuTogglePause, paused_ ? L"继续刷新" : L"暂停刷新");
+        AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAlwaysOnTop, L"窗口置顶");
         AppendMenuW(menu, MF_STRING | (startHidden_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleStartHidden, L"启动时隐藏面板");
         AppendMenuW(menu, MF_STRING | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAutoStart, L"开机自启");
         AppendMenuW(menu, MF_STRING, kMenuResetPosition, L"重置窗口位置");
@@ -1578,6 +1616,17 @@ private:
 
     void appendInfoItem(HMENU menu, const std::wstring& text) {
         AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, text.c_str());
+    }
+
+    std::wstring windowStateText() {
+        std::wstring text = IsWindowVisible(hwnd_) ? L"状态: 面板显示中" : L"状态: 后台运行中";
+        if (paused_) {
+            text += L" / 已暂停";
+        }
+        if (alwaysOnTop_) {
+            text += L" / 已置顶";
+        }
+        return text;
     }
 
     void showTrayBalloon(const std::wstring& title, const std::wstring& message) {
@@ -1670,6 +1719,29 @@ private:
         }
     }
 
+    void applyAlwaysOnTop() {
+        if (!hwnd_) {
+            return;
+        }
+        SetWindowPos(hwnd_, alwaysOnTop_ ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
+    void toggleAlwaysOnTop() {
+        alwaysOnTop_ = !alwaysOnTop_;
+        writeBoolSetting(L"AlwaysOnTop", alwaysOnTop_);
+        applyAlwaysOnTop();
+        showTrayBalloon(L"MiniMonitor", alwaysOnTop_ ? L"窗口将保持在其他窗口上方。" : L"窗口置顶已关闭。");
+    }
+
+    void togglePause() {
+        paused_ = !paused_;
+        writeBoolSetting(L"Paused", paused_);
+        updateTrayTip();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        showTrayBalloon(L"MiniMonitor", paused_ ? L"已暂停自动刷新。" : L"已恢复自动刷新。");
+    }
+
     void resetWindowPosition() {
         RECT workArea{};
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
@@ -1700,7 +1772,11 @@ private:
     }
 
     std::wstring trayTipText() {
-        std::wstring tip = L"CPU " + formatPercent(metrics_.cpu) +
+        std::wstring tip;
+        if (paused_) {
+            tip += L"Paused\n";
+        }
+        tip += L"CPU " + formatPercent(metrics_.cpu) +
                            L"  GPU " + (metrics_.gpu >= 0.0 ? formatPercent(metrics_.gpu) : L"N/A") +
                            L"\nMEM " + formatPercent(metrics_.memory) +
                            L"  NET ↓" + formatSpeed(metrics_.netDown) +
@@ -1858,6 +1934,15 @@ private:
 
         drawText(g, L"MiniMonitor", RectF(90, 24, 240, 28), title, colorFromHex(16, 16, 16));
         drawText(g, machineName_, RectF(91, 53, 260, 22), subtitle, colorFromHex(80, 80, 80));
+
+        if (paused_) {
+            Font pausedFont = makeFont(11, FontStyleBold);
+            RectF badge(330, 30, 72, 24);
+            auto badgePath = roundedRect(badge, 7.0f);
+            SolidBrush badgeFill(colorFromHex(24, 24, 24));
+            g.FillPath(&badgeFill, badgePath.get());
+            drawText(g, L"PAUSED", badge, pausedFont, colorFromHex(255, 255, 255), StringAlignmentCenter, StringAlignmentCenter);
+        }
     }
 
     void drawCards(Graphics& g, int width, int height) {
