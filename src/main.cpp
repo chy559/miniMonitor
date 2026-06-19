@@ -64,6 +64,10 @@ constexpr UINT kMenuOpacity100 = 17;
 constexpr UINT kMenuOpacity90 = 18;
 constexpr UINT kMenuOpacity80 = 19;
 constexpr UINT kMenuToggleHighUsageAlerts = 20;
+constexpr UINT kMenuAlertThreshold80 = 21;
+constexpr UINT kMenuAlertThreshold90 = 22;
+constexpr UINT kMenuAlertThreshold95 = 23;
+constexpr UINT kMenuOpenResourceMonitor = 24;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -75,7 +79,7 @@ constexpr int kPanelWidth = 430;
 constexpr int kPanelHeight = 820;
 constexpr int kHistorySize = 64;
 constexpr UINT kDefaultRefreshIntervalMs = 2000;
-constexpr double kHighUsageThreshold = 0.90;
+constexpr DWORD kDefaultHighUsageAlertThreshold = 90;
 constexpr ULONGLONG kHighUsageAlertCooldownMs = 5 * 60 * 1000;
 
 struct SampleHistory {
@@ -1232,6 +1236,7 @@ public:
         paused_ = readBoolSetting(L"Paused", false);
         lockPosition_ = readBoolSetting(L"LockPosition", false);
         highUsageAlerts_ = readBoolSetting(L"HighUsageAlerts", false);
+        highUsageAlertThreshold_ = sanitizeAlertThreshold(readDwordSetting(L"HighUsageAlertThreshold", kDefaultHighUsageAlertThreshold));
         refreshIntervalMs_ = sanitizeRefreshInterval(readDwordSetting(L"RefreshIntervalMs", kDefaultRefreshIntervalMs));
         windowOpacity_ = sanitizeWindowOpacity(readDwordSetting(L"WindowOpacity", 255));
         POINT panelPos = startupPanelPosition(workArea, panelHeight);
@@ -1288,6 +1293,7 @@ private:
     bool paused_ = false;
     bool lockPosition_ = false;
     bool highUsageAlerts_ = false;
+    DWORD highUsageAlertThreshold_ = kDefaultHighUsageAlertThreshold;
     UINT refreshIntervalMs_ = kDefaultRefreshIntervalMs;
     BYTE windowOpacity_ = 255;
     ULONGLONG lastHighUsageAlertTick_ = 0;
@@ -1389,6 +1395,14 @@ private:
                 setWindowOpacity(205);
             } else if (LOWORD(wParam) == kMenuToggleHighUsageAlerts) {
                 toggleHighUsageAlerts();
+            } else if (LOWORD(wParam) == kMenuAlertThreshold80) {
+                setHighUsageAlertThreshold(80);
+            } else if (LOWORD(wParam) == kMenuAlertThreshold90) {
+                setHighUsageAlertThreshold(90);
+            } else if (LOWORD(wParam) == kMenuAlertThreshold95) {
+                setHighUsageAlertThreshold(95);
+            } else if (LOWORD(wParam) == kMenuOpenResourceMonitor) {
+                openResourceMonitor();
             }
             return 0;
         case kTrayMessage:
@@ -1471,6 +1485,13 @@ private:
             return static_cast<BYTE>(value);
         }
         return 255;
+    }
+
+    DWORD sanitizeAlertThreshold(DWORD value) {
+        if (value == 80 || value == 90 || value == 95) {
+            return value;
+        }
+        return kDefaultHighUsageAlertThreshold;
     }
 
     std::wstring executablePath() {
@@ -1684,6 +1705,7 @@ private:
                              L"    Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"));
         appendInfoItem(menu, L"刷新间隔 " + refreshIntervalText());
         appendInfoItem(menu, L"窗口透明度 " + opacityText());
+        appendInfoItem(menu, L"提醒阈值 " + alertThresholdText());
         appendInfoItem(menu, trayQuotaText());
         appendInfoItem(menu, trayTopProcessText());
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1693,6 +1715,7 @@ private:
         AppendMenuW(menu, MF_STRING, kMenuCopyStatus, L"复制当前状态");
         AppendMenuW(menu, MF_STRING, kMenuRefreshQuota, L"刷新 Codex 额度");
         AppendMenuW(menu, MF_STRING, kMenuOpenTaskManager, L"打开任务管理器");
+        AppendMenuW(menu, MF_STRING, kMenuOpenResourceMonitor, L"打开资源监视器");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (paused_ ? MF_CHECKED : MF_UNCHECKED), kMenuTogglePause, paused_ ? L"继续刷新" : L"暂停刷新");
         AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAlwaysOnTop, L"窗口置顶");
@@ -1702,6 +1725,10 @@ private:
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 1000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval1s, L"刷新间隔: 1 秒");
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 2000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval2s, L"刷新间隔: 2 秒");
         AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 5000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval5s, L"刷新间隔: 5 秒");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (highUsageAlertThreshold_ == 80 ? MF_CHECKED : MF_UNCHECKED), kMenuAlertThreshold80, L"提醒阈值: 80%");
+        AppendMenuW(menu, MF_STRING | (highUsageAlertThreshold_ == 90 ? MF_CHECKED : MF_UNCHECKED), kMenuAlertThreshold90, L"提醒阈值: 90%");
+        AppendMenuW(menu, MF_STRING | (highUsageAlertThreshold_ == 95 ? MF_CHECKED : MF_UNCHECKED), kMenuAlertThreshold95, L"提醒阈值: 95%");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (windowOpacity_ == 255 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity100, L"透明度: 100%");
         AppendMenuW(menu, MF_STRING | (windowOpacity_ == 230 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity90, L"透明度: 90%");
@@ -1826,8 +1853,9 @@ private:
             return;
         }
 
-        const bool highCpu = metrics_.cpu >= kHighUsageThreshold;
-        const bool highMemory = metrics_.memory >= kHighUsageThreshold;
+        const double threshold = static_cast<double>(highUsageAlertThreshold_) / 100.0;
+        const bool highCpu = metrics_.cpu >= threshold;
+        const bool highMemory = metrics_.memory >= threshold;
         if (!highCpu && !highMemory) {
             return;
         }
@@ -1880,10 +1908,30 @@ private:
         return buffer;
     }
 
+    std::wstring alertThresholdText() {
+        wchar_t buffer[32];
+        swprintf(buffer, 32, L"%lu%%", highUsageAlertThreshold_);
+        return buffer;
+    }
+
+    void setHighUsageAlertThreshold(DWORD threshold) {
+        highUsageAlertThreshold_ = sanitizeAlertThreshold(threshold);
+        writeDwordSetting(L"HighUsageAlertThreshold", highUsageAlertThreshold_);
+        lastHighUsageAlertTick_ = 0;
+        showTrayBalloon(L"MiniMonitor", L"高占用提醒阈值已设置为 " + alertThresholdText() + L"。");
+    }
+
     void openTaskManager() {
         HINSTANCE result = ShellExecuteW(hwnd_, L"open", L"taskmgr.exe", nullptr, nullptr, SW_SHOWNORMAL);
         if (reinterpret_cast<INT_PTR>(result) <= 32) {
             showTrayBalloon(L"MiniMonitor", L"无法打开任务管理器。");
+        }
+    }
+
+    void openResourceMonitor() {
+        HINSTANCE result = ShellExecuteW(hwnd_, L"open", L"resmon.exe", nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<INT_PTR>(result) <= 32) {
+            showTrayBalloon(L"MiniMonitor", L"无法打开资源监视器。");
         }
     }
 
@@ -1913,7 +1961,7 @@ private:
         if (highUsageAlerts_) {
             lastHighUsageAlertTick_ = 0;
         }
-        showTrayBalloon(L"MiniMonitor", highUsageAlerts_ ? L"高占用提醒已开启，CPU 或内存超过 90% 时提醒。" : L"高占用提醒已关闭。");
+        showTrayBalloon(L"MiniMonitor", highUsageAlerts_ ? L"高占用提醒已开启，CPU 或内存超过 " + alertThresholdText() + L" 时提醒。" : L"高占用提醒已关闭。");
     }
 
     void toggleStartHidden() {
