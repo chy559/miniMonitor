@@ -1,6 +1,6 @@
 # MiniMonitor for Windows
 
-MiniMonitor is a compact Windows sidebar resource monitor inspired by the macOS LightMonitor app found in `C:\Users\陈 华 宇\Downloads\ColrfulMonitr`.
+MiniMonitor is a compact Windows sidebar resource monitor inspired by lightweight macOS-style system monitor widgets.
 
 It is a native Win32 application with no runtime dependency beyond Windows itself.
 
