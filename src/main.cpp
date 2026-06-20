@@ -74,6 +74,7 @@ constexpr UINT kMenuOpenAppFolder = 27;
 constexpr UINT kMenuResetSettings = 28;
 constexpr UINT kMenuExportStatusReport = 29;
 constexpr UINT kMenuOpenReportsFolder = 30;
+constexpr UINT kMenuClearReports = 31;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -1437,6 +1438,8 @@ private:
                 exportStatusReport();
             } else if (LOWORD(wParam) == kMenuOpenReportsFolder) {
                 openReportsFolder();
+            } else if (LOWORD(wParam) == kMenuClearReports) {
+                clearReports();
             }
             return 0;
         case kTrayMessage:
@@ -1797,6 +1800,7 @@ private:
         AppendMenuW(menu, MF_STRING, kMenuCopyStatus, L"复制当前状态");
         AppendMenuW(menu, MF_STRING, kMenuExportStatusReport, L"导出状态报告");
         AppendMenuW(menu, MF_STRING, kMenuOpenReportsFolder, L"打开报告目录");
+        AppendMenuW(menu, MF_STRING, kMenuClearReports, L"清理状态报告");
         AppendMenuW(menu, MF_STRING, kMenuRefreshQuota, L"刷新 Codex 额度");
         AppendMenuW(menu, MF_STRING, kMenuOpenTaskManager, L"打开任务管理器");
         AppendMenuW(menu, MF_STRING, kMenuOpenResourceMonitor, L"打开资源监视器");
@@ -2028,6 +2032,47 @@ private:
         HINSTANCE result = ShellExecuteW(hwnd_, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         if (reinterpret_cast<INT_PTR>(result) <= 32) {
             showTrayBalloon(L"MiniMonitor", L"无法打开报告目录。");
+        }
+    }
+
+    void clearReports() {
+        std::wstring folder;
+        if (!ensureReportsDirectory(folder)) {
+            showTrayBalloon(L"MiniMonitor", L"无法定位报告目录。");
+            return;
+        }
+
+        const int choice = MessageBoxW(hwnd_,
+                                       L"将删除报告目录中的 MiniMonitor-report-*.txt 文件。\n\n是否继续？",
+                                       L"MiniMonitor", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+        if (choice != IDYES) {
+            return;
+        }
+
+        const std::wstring pattern = folder + L"\\MiniMonitor-report-*.txt";
+        WIN32_FIND_DATAW data{};
+        HANDLE find = FindFirstFileW(pattern.c_str(), &data);
+        if (find == INVALID_HANDLE_VALUE) {
+            showTrayBalloon(L"MiniMonitor", L"没有可清理的状态报告。");
+            return;
+        }
+
+        int deleted = 0;
+        do {
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                continue;
+            }
+            const std::wstring path = folder + L"\\" + data.cFileName;
+            if (DeleteFileW(path.c_str())) {
+                ++deleted;
+            }
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
+
+        if (deleted == 0) {
+            showTrayBalloon(L"MiniMonitor", L"没有可清理的状态报告。");
+        } else {
+            showTrayBalloon(L"MiniMonitor", L"已清理 " + std::to_wstring(deleted) + L" 份状态报告。");
         }
     }
 
