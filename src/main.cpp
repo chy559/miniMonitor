@@ -70,6 +70,8 @@ constexpr UINT kMenuAlertThreshold95 = 23;
 constexpr UINT kMenuOpenResourceMonitor = 24;
 constexpr UINT kMenuToggleGlobalHotkey = 25;
 constexpr UINT kMenuToggleBackgroundEcoMode = 26;
+constexpr UINT kMenuOpenAppFolder = 27;
+constexpr UINT kMenuResetSettings = 28;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -1425,6 +1427,10 @@ private:
                 toggleGlobalHotkey();
             } else if (LOWORD(wParam) == kMenuToggleBackgroundEcoMode) {
                 toggleBackgroundEcoMode();
+            } else if (LOWORD(wParam) == kMenuOpenAppFolder) {
+                openAppFolder();
+            } else if (LOWORD(wParam) == kMenuResetSettings) {
+                resetAppSettings();
             }
             return 0;
         case kTrayMessage:
@@ -1532,6 +1538,15 @@ private:
         }
         path.resize(length);
         return path;
+    }
+
+    std::wstring appDirectory() {
+        std::wstring path = executablePath();
+        const size_t slash = path.find_last_of(L"\\/");
+        if (slash == std::wstring::npos) {
+            return L"";
+        }
+        return path.substr(0, slash);
     }
 
     std::wstring autoStartCommand() {
@@ -1772,6 +1787,8 @@ private:
         AppendMenuW(menu, MF_STRING | (startHidden_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleStartHidden, L"启动时隐藏面板");
         AppendMenuW(menu, MF_STRING | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAutoStart, L"开机自启");
         AppendMenuW(menu, MF_STRING, kMenuResetPosition, L"重置窗口位置");
+        AppendMenuW(menu, MF_STRING, kMenuOpenAppFolder, L"打开程序目录");
+        AppendMenuW(menu, MF_STRING, kMenuResetSettings, L"恢复默认设置");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuExit, L"退出");
     }
@@ -1995,6 +2012,49 @@ private:
         }
     }
 
+    void openAppFolder() {
+        const std::wstring folder = appDirectory();
+        if (folder.empty()) {
+            showTrayBalloon(L"MiniMonitor", L"无法定位程序目录。");
+            return;
+        }
+        HINSTANCE result = ShellExecuteW(hwnd_, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<INT_PTR>(result) <= 32) {
+            showTrayBalloon(L"MiniMonitor", L"无法打开程序目录。");
+        }
+    }
+
+    void resetAppSettings() {
+        const int choice = MessageBoxW(hwnd_,
+                                       L"恢复默认设置会重置窗口位置、透明度、刷新频率、提醒、快捷键等 MiniMonitor 设置。\n\n是否继续？",
+                                       L"MiniMonitor", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+        if (choice != IDYES) {
+            return;
+        }
+
+        RegDeleteTreeW(HKEY_CURRENT_USER, kSettingsKey);
+        startHidden_ = false;
+        alwaysOnTop_ = false;
+        paused_ = false;
+        lockPosition_ = false;
+        highUsageAlerts_ = false;
+        globalHotkeyEnabled_ = true;
+        backgroundEcoMode_ = false;
+        highUsageAlertThreshold_ = kDefaultHighUsageAlertThreshold;
+        refreshIntervalMs_ = kDefaultRefreshIntervalMs;
+        windowOpacity_ = 255;
+        lastHighUsageAlertTick_ = 0;
+
+        applyAlwaysOnTop();
+        applyWindowOpacity();
+        applyGlobalHotkey(false);
+        applyRefreshTimer();
+        movePanelToDefaultPosition(false);
+        updateTrayTip();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        showTrayBalloon(L"MiniMonitor", L"已恢复默认设置。");
+    }
+
     bool applyGlobalHotkey(bool announce) {
         unregisterGlobalHotkey();
         if (!globalHotkeyEnabled_ || !hwnd_) {
@@ -2107,6 +2167,12 @@ private:
     }
 
     void resetWindowPosition() {
+        movePanelToDefaultPosition(true);
+        showPanel();
+        showTrayBalloon(L"MiniMonitor", L"窗口已回到屏幕右侧。");
+    }
+
+    void movePanelToDefaultPosition(bool savePosition) {
         RECT workArea{};
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
         RECT rect{};
@@ -2115,9 +2181,9 @@ private:
         const int x = workArea.right - kPanelWidth - 16;
         const int y = workArea.top + 16;
         MoveWindow(hwnd_, x, y, kPanelWidth, height, TRUE);
-        saveWindowPosition();
-        showPanel();
-        showTrayBalloon(L"MiniMonitor", L"窗口已回到屏幕右侧。");
+        if (savePosition) {
+            saveWindowPosition();
+        }
     }
 
     std::wstring trayQuotaText() {
