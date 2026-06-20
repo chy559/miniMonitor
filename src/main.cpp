@@ -73,6 +73,7 @@ constexpr UINT kMenuToggleBackgroundEcoMode = 26;
 constexpr UINT kMenuOpenAppFolder = 27;
 constexpr UINT kMenuResetSettings = 28;
 constexpr UINT kMenuExportStatusReport = 29;
+constexpr UINT kMenuOpenReportsFolder = 30;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -1434,6 +1435,8 @@ private:
                 resetAppSettings();
             } else if (LOWORD(wParam) == kMenuExportStatusReport) {
                 exportStatusReport();
+            } else if (LOWORD(wParam) == kMenuOpenReportsFolder) {
+                openReportsFolder();
             }
             return 0;
         case kTrayMessage:
@@ -1558,6 +1561,17 @@ private:
             return L"";
         }
         return folder + L"\\reports";
+    }
+
+    bool ensureReportsDirectory(std::wstring& folder) {
+        folder = reportsDirectory();
+        if (folder.empty()) {
+            return false;
+        }
+        if (CreateDirectoryW(folder.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS) {
+            return true;
+        }
+        return false;
     }
 
     std::wstring reportTimestampForFile() {
@@ -1782,6 +1796,7 @@ private:
         AppendMenuW(menu, MF_STRING, kMenuRefreshNow, L"立即刷新");
         AppendMenuW(menu, MF_STRING, kMenuCopyStatus, L"复制当前状态");
         AppendMenuW(menu, MF_STRING, kMenuExportStatusReport, L"导出状态报告");
+        AppendMenuW(menu, MF_STRING, kMenuOpenReportsFolder, L"打开报告目录");
         AppendMenuW(menu, MF_STRING, kMenuRefreshQuota, L"刷新 Codex 额度");
         AppendMenuW(menu, MF_STRING, kMenuOpenTaskManager, L"打开任务管理器");
         AppendMenuW(menu, MF_STRING, kMenuOpenResourceMonitor, L"打开资源监视器");
@@ -1987,12 +2002,11 @@ private:
         updateHistory();
         updateTrayTip();
 
-        const std::wstring folder = reportsDirectory();
-        if (folder.empty()) {
+        std::wstring folder;
+        if (!ensureReportsDirectory(folder)) {
             showTrayBalloon(L"MiniMonitor", L"无法定位报告目录。");
             return;
         }
-        CreateDirectoryW(folder.c_str(), nullptr);
 
         const std::wstring filename = L"MiniMonitor-report-" + reportTimestampForFile() + L".txt";
         const std::wstring path = folder + L"\\" + filename;
@@ -2003,6 +2017,18 @@ private:
 
         ShellExecuteW(hwnd_, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         showTrayBalloon(L"MiniMonitor", L"状态报告已导出: " + filename);
+    }
+
+    void openReportsFolder() {
+        std::wstring folder;
+        if (!ensureReportsDirectory(folder)) {
+            showTrayBalloon(L"MiniMonitor", L"无法定位报告目录。");
+            return;
+        }
+        HINSTANCE result = ShellExecuteW(hwnd_, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<INT_PTR>(result) <= 32) {
+            showTrayBalloon(L"MiniMonitor", L"无法打开报告目录。");
+        }
     }
 
     void refreshNow(bool showFeedback) {
