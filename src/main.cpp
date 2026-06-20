@@ -72,6 +72,7 @@ constexpr UINT kMenuToggleGlobalHotkey = 25;
 constexpr UINT kMenuToggleBackgroundEcoMode = 26;
 constexpr UINT kMenuOpenAppFolder = 27;
 constexpr UINT kMenuResetSettings = 28;
+constexpr UINT kMenuExportStatusReport = 29;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -1431,6 +1432,8 @@ private:
                 openAppFolder();
             } else if (LOWORD(wParam) == kMenuResetSettings) {
                 resetAppSettings();
+            } else if (LOWORD(wParam) == kMenuExportStatusReport) {
+                exportStatusReport();
             }
             return 0;
         case kTrayMessage:
@@ -1547,6 +1550,23 @@ private:
             return L"";
         }
         return path.substr(0, slash);
+    }
+
+    std::wstring reportsDirectory() {
+        std::wstring folder = appDirectory();
+        if (folder.empty()) {
+            return L"";
+        }
+        return folder + L"\\reports";
+    }
+
+    std::wstring reportTimestampForFile() {
+        SYSTEMTIME time{};
+        GetLocalTime(&time);
+        wchar_t buffer[40]{};
+        swprintf(buffer, 40, L"%04u%02u%02u-%02u%02u%02u", time.wYear, time.wMonth, time.wDay,
+                 time.wHour, time.wMinute, time.wSecond);
+        return buffer;
     }
 
     std::wstring autoStartCommand() {
@@ -1761,6 +1781,7 @@ private:
         AppendMenuW(menu, MF_STRING, kMenuHide, L"隐藏到后台");
         AppendMenuW(menu, MF_STRING, kMenuRefreshNow, L"立即刷新");
         AppendMenuW(menu, MF_STRING, kMenuCopyStatus, L"复制当前状态");
+        AppendMenuW(menu, MF_STRING, kMenuExportStatusReport, L"导出状态报告");
         AppendMenuW(menu, MF_STRING, kMenuRefreshQuota, L"刷新 Codex 额度");
         AppendMenuW(menu, MF_STRING, kMenuOpenTaskManager, L"打开任务管理器");
         AppendMenuW(menu, MF_STRING, kMenuOpenResourceMonitor, L"打开资源监视器");
@@ -1856,6 +1877,53 @@ private:
         return text;
     }
 
+    std::wstring processRowsReport(const std::wstring& title, const std::vector<ProcessRow>& rows, const std::wstring& mode) {
+        std::wstring text = title + L"\r\n";
+        if (rows.empty()) {
+            return text + L"  N/A\r\n";
+        }
+        for (const auto& row : rows) {
+            text += L"  " + row.name + L"  PID " + std::to_wstring(row.pid);
+            if (mode == L"cpu") {
+                text += L"  CPU " + formatOneDecimalPercent(row.cpu);
+            } else if (mode == L"memory") {
+                text += L"  MEM " + formatBytes(static_cast<double>(row.memory));
+            } else {
+                text += L"  GPU " + (row.gpu >= 0.0 ? formatOneDecimalPercent(row.gpu) : L"N/A");
+            }
+            text += L"\r\n";
+        }
+        return text;
+    }
+
+    std::wstring statusReportText() {
+        std::wstring text = statusSummaryText();
+        text += L"\r\n\r\nTop Processes\r\n";
+        text += processRowsReport(L"CPU", metrics_.topCpu, L"cpu");
+        text += processRowsReport(L"Memory", metrics_.topMemory, L"memory");
+        text += processRowsReport(L"GPU", metrics_.topGpu, L"gpu");
+
+        text += L"\r\nCodex\r\n";
+        text += L"  Status: " + metrics_.quota.status + L"\r\n";
+        text += L"  " + metrics_.quota.firstLabel + L": " + metrics_.quota.firstUsage + L" / " +
+                metrics_.quota.fiveHourReset + L"\r\n";
+        text += L"  " + metrics_.quota.secondLabel + L": " + metrics_.quota.secondUsage + L" / " +
+                metrics_.quota.sevenDayReset + L"\r\n";
+        text += L"  Last updated: " + metrics_.quota.lastUpdated + L"\r\n";
+
+        text += L"\r\nSettings\r\n";
+        text += L"  Refresh interval: " + refreshIntervalText() + L"\r\n";
+        text += L"  Background refresh: " + backgroundRefreshText() + L"\r\n";
+        text += L"  Opacity: " + opacityText() + L"\r\n";
+        text += L"  High usage alerts: " + std::wstring(highUsageAlerts_ ? L"On" : L"Off") +
+                L" (" + alertThresholdText() + L")\r\n";
+        text += L"  Always on top: " + std::wstring(alwaysOnTop_ ? L"On" : L"Off") + L"\r\n";
+        text += L"  Position locked: " + std::wstring(lockPosition_ ? L"On" : L"Off") + L"\r\n";
+        text += L"  Global hotkey: " + std::wstring(globalHotkeyRegistered_ ? L"Registered" : L"Off") + L"\r\n";
+        text += L"\r\nGenerated: " + formatCurrentClock() + L"\r\n";
+        return text;
+    }
+
     bool setClipboardText(const std::wstring& text) {
         if (!OpenClipboard(hwnd_)) {
             return false;
@@ -1884,6 +1952,25 @@ private:
         return true;
     }
 
+    bool writeUtf16TextFile(const std::wstring& path, const std::wstring& text) {
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+
+        const WORD bom = 0xFEFF;
+        DWORD written = 0;
+        bool ok = WriteFile(file, &bom, sizeof(bom), &written, nullptr) && written == sizeof(bom);
+        if (ok && !text.empty()) {
+            const DWORD bytes = static_cast<DWORD>(text.size() * sizeof(wchar_t));
+            written = 0;
+            ok = WriteFile(file, text.c_str(), bytes, &written, nullptr) && written == bytes;
+        }
+        CloseHandle(file);
+        return ok;
+    }
+
     void copyStatusToClipboard() {
         metrics_ = sampler_.collect();
         updateHistory();
@@ -1893,6 +1980,29 @@ private:
         } else {
             showTrayBalloon(L"MiniMonitor", L"复制失败，剪贴板可能正被占用。");
         }
+    }
+
+    void exportStatusReport() {
+        metrics_ = sampler_.collect();
+        updateHistory();
+        updateTrayTip();
+
+        const std::wstring folder = reportsDirectory();
+        if (folder.empty()) {
+            showTrayBalloon(L"MiniMonitor", L"无法定位报告目录。");
+            return;
+        }
+        CreateDirectoryW(folder.c_str(), nullptr);
+
+        const std::wstring filename = L"MiniMonitor-report-" + reportTimestampForFile() + L".txt";
+        const std::wstring path = folder + L"\\" + filename;
+        if (!writeUtf16TextFile(path, statusReportText())) {
+            showTrayBalloon(L"MiniMonitor", L"状态报告导出失败。");
+            return;
+        }
+
+        ShellExecuteW(hwnd_, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        showTrayBalloon(L"MiniMonitor", L"状态报告已导出: " + filename);
     }
 
     void refreshNow(bool showFeedback) {
