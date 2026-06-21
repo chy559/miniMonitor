@@ -75,6 +75,10 @@ constexpr UINT kMenuResetSettings = 28;
 constexpr UINT kMenuExportStatusReport = 29;
 constexpr UINT kMenuOpenReportsFolder = 30;
 constexpr UINT kMenuClearReports = 31;
+constexpr UINT kMenuThemeMono = 32;
+constexpr UINT kMenuThemeOcean = 33;
+constexpr UINT kMenuThemeSakura = 34;
+constexpr UINT kMenuThemeForest = 35;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -150,6 +154,13 @@ enum class CardIcon {
     Apps,
     Network,
     Disk,
+};
+
+enum class UiTheme : DWORD {
+    Mono = 0,
+    Ocean = 1,
+    Sakura = 2,
+    Forest = 3,
 };
 
 struct Metrics {
@@ -530,6 +541,28 @@ void enableDpiAwareness() {
 Color colorFromHex(BYTE r, BYTE g, BYTE b, BYTE a = 255) {
     return Color(a, r, g, b);
 }
+
+struct ThemePalette {
+    const wchar_t* name;
+    Color bgTop;
+    Color bgBottom;
+    Color panel;
+    Color panelBorder;
+    Color panelEdge;
+    Color text;
+    Color muted;
+    Color subtle;
+    Color iconBg;
+    Color iconFg;
+    Color accent;
+    Color accent2;
+    Color accent3;
+    Color barBg;
+    Color buttonBg;
+    Color sparkArea;
+    Color frameLight;
+    Color frameDark;
+};
 
 std::unique_ptr<GraphicsPath> roundedRect(RectF rect, REAL radius) {
     auto path = std::make_unique<GraphicsPath>();
@@ -1250,6 +1283,7 @@ public:
         highUsageAlertThreshold_ = sanitizeAlertThreshold(readDwordSetting(L"HighUsageAlertThreshold", kDefaultHighUsageAlertThreshold));
         refreshIntervalMs_ = sanitizeRefreshInterval(readDwordSetting(L"RefreshIntervalMs", kDefaultRefreshIntervalMs));
         windowOpacity_ = sanitizeWindowOpacity(readDwordSetting(L"WindowOpacity", 255));
+        theme_ = sanitizeTheme(readDwordSetting(L"Theme", static_cast<DWORD>(UiTheme::Mono)));
         POINT panelPos = startupPanelPosition(workArea, panelHeight);
 
         hwnd_ = CreateWindowExW(
@@ -1308,6 +1342,7 @@ private:
     bool globalHotkeyEnabled_ = true;
     bool globalHotkeyRegistered_ = false;
     bool backgroundEcoMode_ = false;
+    UiTheme theme_ = UiTheme::Mono;
     DWORD highUsageAlertThreshold_ = kDefaultHighUsageAlertThreshold;
     UINT refreshIntervalMs_ = kDefaultRefreshIntervalMs;
     BYTE windowOpacity_ = 255;
@@ -1441,6 +1476,14 @@ private:
                 openReportsFolder();
             } else if (LOWORD(wParam) == kMenuClearReports) {
                 clearReports();
+            } else if (LOWORD(wParam) == kMenuThemeMono) {
+                setTheme(UiTheme::Mono);
+            } else if (LOWORD(wParam) == kMenuThemeOcean) {
+                setTheme(UiTheme::Ocean);
+            } else if (LOWORD(wParam) == kMenuThemeSakura) {
+                setTheme(UiTheme::Sakura);
+            } else if (LOWORD(wParam) == kMenuThemeForest) {
+                setTheme(UiTheme::Forest);
             }
             return 0;
         case kTrayMessage:
@@ -1524,6 +1567,111 @@ private:
             return static_cast<BYTE>(value);
         }
         return 255;
+    }
+
+    UiTheme sanitizeTheme(DWORD value) {
+        if (value <= static_cast<DWORD>(UiTheme::Forest)) {
+            return static_cast<UiTheme>(value);
+        }
+        return UiTheme::Mono;
+    }
+
+    ThemePalette theme() const {
+        switch (theme_) {
+        case UiTheme::Ocean:
+            return {
+                L"海盐蓝",
+                colorFromHex(232, 245, 249),
+                colorFromHex(210, 228, 237),
+                colorFromHex(248, 253, 255),
+                colorFromHex(255, 255, 255),
+                Color(64, 28, 90, 112),
+                colorFromHex(18, 40, 54),
+                colorFromHex(76, 104, 120),
+                colorFromHex(112, 139, 153),
+                colorFromHex(30, 105, 148),
+                colorFromHex(240, 250, 255),
+                colorFromHex(20, 117, 170),
+                colorFromHex(72, 159, 181),
+                colorFromHex(246, 167, 76),
+                colorFromHex(214, 234, 241),
+                colorFromHex(239, 248, 251),
+                Color(30, 20, 117, 170),
+                Color(210, 255, 255, 255),
+                Color(72, 28, 86, 112),
+            };
+        case UiTheme::Sakura:
+            return {
+                L"樱雾粉",
+                colorFromHex(252, 238, 244),
+                colorFromHex(235, 221, 236),
+                colorFromHex(255, 250, 253),
+                colorFromHex(255, 255, 255),
+                Color(66, 116, 70, 96),
+                colorFromHex(58, 35, 55),
+                colorFromHex(116, 82, 108),
+                colorFromHex(151, 111, 141),
+                colorFromHex(177, 80, 126),
+                colorFromHex(255, 245, 250),
+                colorFromHex(207, 82, 136),
+                colorFromHex(118, 105, 190),
+                colorFromHex(226, 150, 82),
+                colorFromHex(239, 224, 235),
+                colorFromHex(255, 246, 251),
+                Color(30, 207, 82, 136),
+                Color(214, 255, 255, 255),
+                Color(74, 120, 72, 98),
+            };
+        case UiTheme::Forest:
+            return {
+                L"森林绿",
+                colorFromHex(234, 243, 235),
+                colorFromHex(214, 229, 216),
+                colorFromHex(249, 253, 247),
+                colorFromHex(255, 255, 255),
+                Color(70, 56, 91, 64),
+                colorFromHex(28, 49, 35),
+                colorFromHex(82, 105, 86),
+                colorFromHex(117, 137, 119),
+                colorFromHex(59, 122, 83),
+                colorFromHex(246, 253, 247),
+                colorFromHex(55, 132, 87),
+                colorFromHex(103, 157, 82),
+                colorFromHex(210, 152, 65),
+                colorFromHex(222, 235, 220),
+                colorFromHex(242, 250, 242),
+                Color(30, 55, 132, 87),
+                Color(210, 255, 255, 255),
+                Color(76, 54, 92, 61),
+            };
+        case UiTheme::Mono:
+        default:
+            return {
+                L"黑白简约",
+                colorFromHex(250, 250, 249),
+                colorFromHex(232, 232, 230),
+                colorFromHex(255, 255, 255),
+                colorFromHex(255, 255, 255),
+                Color(72, 0, 0, 0),
+                colorFromHex(16, 16, 16),
+                colorFromHex(82, 82, 82),
+                colorFromHex(120, 120, 120),
+                colorFromHex(24, 24, 24),
+                colorFromHex(255, 255, 255),
+                colorFromHex(24, 24, 24),
+                colorFromHex(96, 96, 96),
+                colorFromHex(48, 48, 48),
+                colorFromHex(229, 229, 229),
+                colorFromHex(248, 248, 248),
+                Color(24, 0, 0, 0),
+                Color(190, 255, 255, 255),
+                Color(72, 0, 0, 0),
+            };
+        }
+    }
+
+    std::wstring themeName() const {
+        return theme().name;
     }
 
     DWORD sanitizeAlertThreshold(DWORD value) {
@@ -1839,8 +1987,16 @@ private:
 
         HMENU displayMenu = CreatePopupMenu();
         appendInfoItem(displayMenu, L"窗口透明度 " + opacityText());
+        appendInfoItem(displayMenu, L"当前主题 " + themeName());
         AppendMenuW(displayMenu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAlwaysOnTop, L"窗口置顶");
         AppendMenuW(displayMenu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleLockPosition, L"锁定窗口位置");
+        AppendMenuW(displayMenu, MF_SEPARATOR, 0, nullptr);
+        HMENU themeMenu = CreatePopupMenu();
+        AppendMenuW(themeMenu, MF_STRING | (theme_ == UiTheme::Mono ? MF_CHECKED : MF_UNCHECKED), kMenuThemeMono, L"黑白简约");
+        AppendMenuW(themeMenu, MF_STRING | (theme_ == UiTheme::Ocean ? MF_CHECKED : MF_UNCHECKED), kMenuThemeOcean, L"海盐蓝");
+        AppendMenuW(themeMenu, MF_STRING | (theme_ == UiTheme::Sakura ? MF_CHECKED : MF_UNCHECKED), kMenuThemeSakura, L"樱雾粉");
+        AppendMenuW(themeMenu, MF_STRING | (theme_ == UiTheme::Forest ? MF_CHECKED : MF_UNCHECKED), kMenuThemeForest, L"森林绿");
+        AppendMenuW(displayMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(themeMenu), L"主题");
         AppendMenuW(displayMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(displayMenu, MF_STRING | (windowOpacity_ == 255 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity100, L"透明度: 100%");
         AppendMenuW(displayMenu, MF_STRING | (windowOpacity_ == 230 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity90, L"透明度: 90%");
@@ -1974,6 +2130,7 @@ private:
         text += L"  Last updated: " + metrics_.quota.lastUpdated + L"\r\n";
 
         text += L"\r\nSettings\r\n";
+        text += L"  Theme: " + themeName() + L"\r\n";
         text += L"  Refresh interval: " + refreshIntervalText() + L"\r\n";
         text += L"  Background refresh: " + backgroundRefreshText() + L"\r\n";
         text += L"  Opacity: " + opacityText() + L"\r\n";
@@ -2264,6 +2421,7 @@ private:
         highUsageAlerts_ = false;
         globalHotkeyEnabled_ = true;
         backgroundEcoMode_ = false;
+        theme_ = UiTheme::Mono;
         highUsageAlertThreshold_ = kDefaultHighUsageAlertThreshold;
         refreshIntervalMs_ = kDefaultRefreshIntervalMs;
         windowOpacity_ = 255;
@@ -2335,6 +2493,14 @@ private:
         writeDwordSetting(L"WindowOpacity", windowOpacity_);
         applyWindowOpacity();
         showTrayBalloon(L"MiniMonitor", L"窗口透明度已设置为 " + opacityText() + L"。");
+    }
+
+    void setTheme(UiTheme theme) {
+        theme_ = theme;
+        writeDwordSetting(L"Theme", static_cast<DWORD>(theme_));
+        updateTrayTip();
+        InvalidateRect(hwnd_, nullptr, TRUE);
+        showTrayBalloon(L"MiniMonitor", L"主题已切换为 " + themeName() + L"。");
     }
 
     void toggleLockPosition() {
@@ -2599,60 +2765,64 @@ private:
     }
 
     void drawBackground(Graphics& g, int width, int height) {
+        const auto t = theme();
         LinearGradientBrush bg(
             Rect(0, 0, width, height),
-            colorFromHex(250, 250, 249),
-            colorFromHex(232, 232, 230),
+            t.bgTop,
+            t.bgBottom,
             LinearGradientModeVertical);
         g.FillRectangle(&bg, 0, 0, width, height);
     }
 
     void drawWindowFrame(Graphics& g, int width, int height) {
+        const auto t = theme();
         RectF outer(0.5f, 0.5f, static_cast<REAL>(width) - 1.0f, static_cast<REAL>(height) - 1.0f);
         auto outerPath = roundedRect(outer, 12.0f);
-        Pen outerPen(Color(190, 255, 255, 255), 1.0f);
+        Pen outerPen(t.frameLight, 1.0f);
         g.DrawPath(&outerPen, outerPath.get());
 
         RectF inner(1.5f, 1.5f, static_cast<REAL>(width) - 3.0f, static_cast<REAL>(height) - 3.0f);
         auto innerPath = roundedRect(inner, 11.0f);
-        Pen innerPen(Color(72, 0, 0, 0), 1.0f);
+        Pen innerPen(t.frameDark, 1.0f);
         g.DrawPath(&innerPen, innerPath.get());
     }
 
     void drawHeader(Graphics& g, int) {
+        const auto t = theme();
         Font title = makeFont(22, FontStyleBold);
         Font subtitle = makeFont(13, FontStyleBold);
 
         RectF iconRect(28, 24, 48, 48);
         auto iconPath = roundedRect(iconRect, 12.0f);
-        SolidBrush iconBrush(colorFromHex(24, 24, 24));
+        SolidBrush iconBrush(t.iconBg);
         g.FillPath(&iconBrush, iconPath.get());
-        Pen iconPen(Color(235, 255, 255, 255), 2.0f);
+        Pen iconPen(t.iconFg, 2.0f);
         g.DrawEllipse(&iconPen, iconRect.X + 12.0f, iconRect.Y + 12.0f, 24.0f, 24.0f);
         g.DrawLine(&iconPen, iconRect.X + 24, iconRect.Y + 18, iconRect.X + 24, iconRect.Y + 31);
         g.DrawLine(&iconPen, iconRect.X + 24, iconRect.Y + 31, iconRect.X + 32, iconRect.Y + 25);
 
-        drawText(g, L"MiniMonitor", RectF(90, 24, 240, 28), title, colorFromHex(16, 16, 16));
-        drawText(g, machineName_, RectF(91, 53, 260, 22), subtitle, colorFromHex(80, 80, 80));
+        drawText(g, L"MiniMonitor", RectF(90, 24, 240, 28), title, t.text);
+        drawText(g, machineName_, RectF(91, 53, 260, 22), subtitle, t.muted);
 
         if (paused_) {
             Font pausedFont = makeFont(11, FontStyleBold);
             RectF badge(330, 30, 72, 24);
             auto badgePath = roundedRect(badge, 7.0f);
-            SolidBrush badgeFill(colorFromHex(24, 24, 24));
+            SolidBrush badgeFill(t.iconBg);
             g.FillPath(&badgeFill, badgePath.get());
-            drawText(g, L"PAUSED", badge, pausedFont, colorFromHex(255, 255, 255), StringAlignmentCenter, StringAlignmentCenter);
+            drawText(g, L"PAUSED", badge, pausedFont, t.iconFg, StringAlignmentCenter, StringAlignmentCenter);
         }
     }
 
     void drawCards(Graphics& g, int width, int height) {
+        const auto t = theme();
         const REAL margin = 18.0f;
         const REAL gap = 12.0f;
         const REAL top = 96.0f;
         const REAL halfW = (width - margin * 2.0f - gap) / 2.0f;
 
         drawMetricCard(g, RectF(margin, top, halfW, 132), L"CPU", formatPercent(metrics_.cpu),
-                       L"系统负载", cpuHistory_, colorFromHex(24, 24, 24), CardIcon::Cpu);
+                       L"系统负载", cpuHistory_, t.accent, CardIcon::Cpu);
         drawGpuCard(g, RectF(margin + halfW + gap, top, halfW, 132));
         drawMemoryCard(g, RectF(margin, top + 144, width - margin * 2.0f, 104));
 
@@ -2666,25 +2836,26 @@ private:
         drawSmallStatCard(g, RectF(margin, rowY, halfW, 76), L"Network",
                           L"↓ " + formatSpeed(metrics_.netDown),
                           L"↑ " + formatSpeed(metrics_.netUp),
-                          colorFromHex(24, 24, 24), CardIcon::Network);
+                          t.accent2, CardIcon::Network);
         drawSmallStatCard(g, RectF(margin + halfW + gap, rowY, halfW, 76), L"Disk",
                           formatBytes(static_cast<double>(metrics_.diskUsed)) + L" / " +
-                              formatBytes(static_cast<double>(metrics_.diskTotal)),
+                          formatBytes(static_cast<double>(metrics_.diskTotal)),
                           L"Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A"),
-                          colorFromHex(24, 24, 24), CardIcon::Disk);
+                          t.accent3, CardIcon::Disk);
         drawFooter(g, width, height);
     }
 
     void drawPanel(Graphics& g, RectF rect) {
+        const auto t = theme();
         RectF shadowRect(rect.X, rect.Y + 2.0f, rect.Width, rect.Height);
         auto shadowPath = roundedRect(shadowRect, 8.0f);
         SolidBrush shadow(Color(22, 0, 0, 0));
         g.FillPath(&shadow, shadowPath.get());
 
         auto path = roundedRect(rect, 8.0f);
-        SolidBrush fill(colorFromHex(255, 255, 255));
-        Pen border(colorFromHex(255, 255, 255), 1.0f);
-        Pen edge(Color(72, 0, 0, 0), 1.0f);
+        SolidBrush fill(t.panel);
+        Pen border(t.panelBorder, 1.0f);
+        Pen edge(t.panelEdge, 1.0f);
         g.FillPath(&fill, path.get());
         g.DrawPath(&border, path.get());
         RectF inset(rect.X + 0.5f, rect.Y + 0.5f, rect.Width - 1.0f, rect.Height - 1.0f);
@@ -2693,11 +2864,12 @@ private:
     }
 
     void drawCardIcon(Graphics& g, RectF rect, CardIcon icon) {
-        Pen pen(colorFromHex(24, 24, 24), 1.8f);
+        const auto t = theme();
+        Pen pen(t.accent, 1.8f);
         pen.SetStartCap(LineCapRound);
         pen.SetEndCap(LineCapRound);
-        Pen lightPen(colorFromHex(110, 110, 110), 1.3f);
-        SolidBrush dot(colorFromHex(24, 24, 24));
+        Pen lightPen(t.subtle, 1.3f);
+        SolidBrush dot(t.accent);
         const REAL x = rect.X;
         const REAL y = rect.Y;
         const REAL w = rect.Width;
@@ -2760,6 +2932,7 @@ private:
 
     void drawMetricCard(Graphics& g, RectF rect, const std::wstring& title, const std::wstring& value,
                         const std::wstring& subtitle, const SampleHistory& history, Color accent, CardIcon icon) {
+        const auto t = theme();
         drawPanel(g, rect);
 
         Font label = makeFont(18, FontStyleBold);
@@ -2767,60 +2940,63 @@ private:
         Font small = makeFont(12, FontStyleBold);
 
         drawCardIcon(g, RectF(rect.X + rect.Width - 42, rect.Y + 16, 24, 24), icon);
-        drawText(g, title, RectF(rect.X + 18, rect.Y + 18, rect.Width - 128, 24), label, colorFromHex(16, 16, 16));
-        drawText(g, value, RectF(rect.X + rect.Width - 134, rect.Y + 15, 86, 38), valueFont, colorFromHex(16, 16, 16),
+        drawText(g, title, RectF(rect.X + 18, rect.Y + 18, rect.Width - 128, 24), label, t.text);
+        drawText(g, value, RectF(rect.X + rect.Width - 134, rect.Y + 15, 86, 38), valueFont, t.text,
                  StringAlignmentFar);
-        drawText(g, subtitle, RectF(rect.X + 18, rect.Y + 47, rect.Width - 36, 20), small, colorFromHex(82, 82, 82));
+        drawText(g, subtitle, RectF(rect.X + 18, rect.Y + 47, rect.Width - 36, 20), small, t.muted);
         drawSparkline(g, RectF(rect.X + 18, rect.Y + 78, rect.Width - 36, 46), history, accent);
         drawLegend(g, rect.X + 18, rect.Y + rect.Height - 24, L"2s refresh", accent);
     }
 
     void drawGpuCard(Graphics& g, RectF rect) {
+        const auto t = theme();
         drawPanel(g, rect);
         Font label = makeFont(18, FontStyleBold);
         Font valueFont = makeFont(26, FontStyleBold);
         Font small = makeFont(12, FontStyleBold);
 
         drawCardIcon(g, RectF(rect.X + rect.Width - 42, rect.Y + 16, 24, 24), CardIcon::Gpu);
-        drawText(g, L"GPU", RectF(rect.X + 18, rect.Y + 18, rect.Width - 128, 24), label, colorFromHex(16, 16, 16));
+        drawText(g, L"GPU", RectF(rect.X + 18, rect.Y + 18, rect.Width - 128, 24), label, t.text);
         drawText(g, metrics_.gpu >= 0.0 ? formatPercent(metrics_.gpu) : L"N/A",
-                 RectF(rect.X + rect.Width - 134, rect.Y + 16, 86, 34), valueFont, colorFromHex(16, 16, 16),
+                 RectF(rect.X + rect.Width - 134, rect.Y + 16, 86, 34), valueFont, t.text,
                  StringAlignmentFar);
-        drawText(g, metrics_.gpuName, RectF(rect.X + 18, rect.Y + 52, rect.Width - 36, 36), small, colorFromHex(82, 82, 82));
+        drawText(g, metrics_.gpuName, RectF(rect.X + 18, rect.Y + 52, rect.Width - 36, 36), small, t.muted);
 
-        drawSparkline(g, RectF(rect.X + 18, rect.Y + 82, rect.Width - 36, 32), gpuHistory_, colorFromHex(24, 24, 24));
-        drawLegend(g, rect.X + 18, rect.Y + rect.Height - 24, L"GPU engine", colorFromHex(24, 24, 24));
+        drawSparkline(g, RectF(rect.X + 18, rect.Y + 82, rect.Width - 36, 32), gpuHistory_, t.accent2);
+        drawLegend(g, rect.X + 18, rect.Y + rect.Height - 24, L"GPU engine", t.accent2);
     }
 
     void drawMemoryCard(Graphics& g, RectF rect) {
+        const auto t = theme();
         drawPanel(g, rect);
         Font label = makeFont(18, FontStyleBold);
         Font valueFont = makeFont(27, FontStyleBold);
         Font small = makeFont(12, FontStyleBold);
 
         drawCardIcon(g, RectF(rect.X + rect.Width - 44, rect.Y + 16, 24, 24), CardIcon::Memory);
-        drawText(g, L"Memory", RectF(rect.X + 20, rect.Y + 16, 170, 26), label, colorFromHex(16, 16, 16));
+        drawText(g, L"Memory", RectF(rect.X + 20, rect.Y + 16, 170, 26), label, t.text);
         drawText(g, formatPercent(metrics_.memory), RectF(rect.X + rect.Width - 164, rect.Y + 12, 116, 36), valueFont,
-                 colorFromHex(16, 16, 16), StringAlignmentFar);
+                 t.text, StringAlignmentFar);
 
         RectF bar(rect.X + 20, rect.Y + 54, rect.Width - 40, 18);
         auto bgPath = roundedRect(bar, 6.0f);
-        SolidBrush bg(colorFromHex(229, 229, 229));
+        SolidBrush bg(t.barBg);
         g.FillPath(&bg, bgPath.get());
         RectF used = bar;
         used.Width *= static_cast<REAL>(metrics_.memory);
         auto usedPath = roundedRect(used, 6.0f);
-        SolidBrush usedBrush(colorFromHex(24, 24, 24));
+        SolidBrush usedBrush(t.accent);
         g.FillPath(&usedBrush, usedPath.get());
 
         drawText(g,
                  formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
                      formatBytes(static_cast<double>(metrics_.memoryTotal)),
-                 RectF(rect.X + 20, rect.Y + 78, 170, 20), small, colorFromHex(64, 64, 64));
-        drawSparkline(g, RectF(rect.X + rect.Width - 130, rect.Y + 76, 108, 18), memoryHistory_, colorFromHex(24, 24, 24));
+                 RectF(rect.X + 20, rect.Y + 78, 170, 20), small, t.muted);
+        drawSparkline(g, RectF(rect.X + rect.Width - 130, rect.Y + 76, 108, 18), memoryHistory_, t.accent);
     }
 
     void drawQuotaCard(Graphics& g, RectF rect, int width) {
+        const auto t = theme();
         drawPanel(g, rect);
         drawCardIcon(g, RectF(rect.X + rect.Width - 42, rect.Y + 16, 24, 24), CardIcon::Codex);
         std::wstring firstDetail = metrics_.quota.available ? metrics_.quota.fiveHourReset : metrics_.quota.status;
@@ -2831,17 +3007,18 @@ private:
                       metrics_.quota.secondUsage, metrics_.quota.secondProgress, secondDetail);
         Font stamp = makeFont(11, FontStyleRegular);
         drawText(g, metrics_.quota.lastUpdated, RectF(rect.X + 18, rect.Y + 134, rect.Width - 152, 18), stamp,
-                 colorFromHex(96, 96, 96), StringAlignmentFar);
+                 t.subtle, StringAlignmentFar);
         drawQuotaRefreshButton(g, quotaRefreshButtonRect(width));
     }
 
     void drawQuotaLine(Graphics& g, RectF rect, bool weekly, const std::wstring& window,
                        const std::wstring& usage, double progress, const std::wstring& reset) {
+        const auto t = theme();
         Font label = makeFont(15, FontStyleRegular);
         Font percent = makeFont(15, FontStyleBold);
         Font detail = makeFont(12, FontStyleRegular);
-        Color text = colorFromHex(64, 64, 64);
-        Color ink = colorFromHex(24, 24, 24);
+        Color text = t.muted;
+        Color ink = weekly ? t.accent2 : t.accent;
 
         drawQuotaIcon(g, rect.X, rect.Y + 1.0f, weekly, text);
         drawText(g, window, RectF(rect.X + 27, rect.Y - 1, 150, 22), label, text);
@@ -2849,7 +3026,7 @@ private:
 
         RectF bar(rect.X, rect.Y + 27, rect.Width, 7);
         auto bgPath = roundedRect(bar, 3.5f);
-        SolidBrush bg(colorFromHex(229, 229, 229));
+        SolidBrush bg(t.barBg);
         g.FillPath(&bg, bgPath.get());
         if (progress > 0.0) {
             RectF fill = bar;
@@ -2877,13 +3054,14 @@ private:
     }
 
     void drawQuotaRefreshButton(Graphics& g, RectF rect) {
+        const auto t = theme();
         auto path = roundedRect(rect, 7.0f);
-        SolidBrush bg(colorFromHex(248, 248, 248));
+        SolidBrush bg(t.buttonBg);
         g.FillPath(&bg, path.get());
-        Pen border(Color(72, 0, 0, 0), 1.0f);
+        Pen border(t.panelEdge, 1.0f);
         g.DrawPath(&border, path.get());
 
-        Pen icon(colorFromHex(24, 24, 24), 1.7f);
+        Pen icon(t.accent, 1.7f);
         icon.SetStartCap(LineCapRound);
         icon.SetEndCap(LineCapRound);
         const REAL cx = rect.X + 13.0f;
@@ -2894,28 +3072,30 @@ private:
 
         Font font = makeFont(12, FontStyleBold);
         drawText(g, L"Refresh", RectF(rect.X + 28, rect.Y + 3, rect.Width - 32, 18), font,
-                 colorFromHex(24, 24, 24));
+                 t.text);
     }
 
     void drawTopAppsCard(Graphics& g, RectF rect) {
+        const auto t = theme();
         drawPanel(g, rect);
         Font title = makeFont(16, FontStyleBold);
         Font row = makeFont(12, FontStyleBold);
 
         drawCardIcon(g, RectF(rect.X + rect.Width - 42, rect.Y + 12, 24, 24), CardIcon::Apps);
-        drawText(g, L"Top Apps", RectF(rect.X + 18, rect.Y + 12, 130, 22), title, colorFromHex(16, 16, 16));
-        drawTopProcessLine(g, rect.X + 18, rect.Y + 39, L"CPU", metrics_.topCpu, row, colorFromHex(24, 24, 24));
-        drawTopProcessLine(g, rect.X + 18, rect.Y + 64, L"MEM", metrics_.topMemory, row, colorFromHex(96, 96, 96));
-        drawTopProcessLine(g, rect.X + 18, rect.Y + 89, L"GPU", metrics_.topGpu, row, colorFromHex(48, 48, 48));
+        drawText(g, L"Top Apps", RectF(rect.X + 18, rect.Y + 12, 130, 22), title, t.text);
+        drawTopProcessLine(g, rect.X + 18, rect.Y + 39, L"CPU", metrics_.topCpu, row, t.accent);
+        drawTopProcessLine(g, rect.X + 18, rect.Y + 64, L"MEM", metrics_.topMemory, row, t.accent2);
+        drawTopProcessLine(g, rect.X + 18, rect.Y + 89, L"GPU", metrics_.topGpu, row, t.accent3);
     }
 
     void drawTopProcessLine(Graphics& g, REAL x, REAL y, const std::wstring& label, const std::vector<ProcessRow>& rows,
                             Font& font, Color accent) {
+        const auto t = theme();
         SolidBrush dot(accent);
         g.FillEllipse(&dot, x, y + 5.0f, 8.0f, 8.0f);
-        drawText(g, label, RectF(x + 14, y, 36, 18), font, colorFromHex(64, 64, 64));
+        drawText(g, label, RectF(x + 14, y, 36, 18), font, t.muted);
         if (rows.empty()) {
-            drawText(g, L"N/A", RectF(x + 54, y, 260, 18), font, colorFromHex(120, 120, 120));
+            drawText(g, L"N/A", RectF(x + 54, y, 260, 18), font, t.subtle);
             return;
         }
 
@@ -2934,44 +3114,47 @@ private:
                 names += formatOneDecimalPercent(rows[i].gpu);
             }
         }
-        drawText(g, names, RectF(x + 54, y, 318, 18), font, colorFromHex(40, 40, 40));
+        drawText(g, names, RectF(x + 54, y, 318, 18), font, t.text);
     }
 
     void drawSmallStatCard(Graphics& g, RectF rect, const std::wstring& title, const std::wstring& primary,
                            const std::wstring& secondary, Color accent, CardIcon icon) {
+        const auto t = theme();
         drawPanel(g, rect);
         Font label = makeFont(15, FontStyleBold);
 
         drawCardIcon(g, RectF(rect.X + rect.Width - 42, rect.Y + 12, 24, 24), icon);
-        drawText(g, title, RectF(rect.X + 18, rect.Y + 12, rect.Width - 62, 20), label, colorFromHex(16, 16, 16));
+        drawText(g, title, RectF(rect.X + 18, rect.Y + 12, rect.Width - 62, 20), label, t.text);
         drawLegend(g, rect.X + 18, rect.Y + 34, primary, accent);
-        drawLegend(g, rect.X + 18, rect.Y + 56, secondary, colorFromHex(96, 96, 96));
+        drawLegend(g, rect.X + 18, rect.Y + 56, secondary, t.muted);
     }
 
     void drawInfoStrip(Graphics& g, RectF rect) {
+        const auto t = theme();
         drawPanel(g, rect);
         Font label = makeFont(14, FontStyleBold);
         Font value = makeFont(13, FontStyleBold);
 
-        drawText(g, L"I/O", RectF(rect.X + 18, rect.Y + 14, 60, 20), label, colorFromHex(35, 32, 43));
+        drawText(g, L"I/O", RectF(rect.X + 18, rect.Y + 14, 60, 20), label, t.text);
         drawText(g, L"Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"),
-                 RectF(rect.X + 18, rect.Y + 40, 150, 22), value, colorFromHex(55, 50, 64));
+                 RectF(rect.X + 18, rect.Y + 40, 150, 22), value, t.muted);
         drawText(g, L"Disk " + formatPercent(metrics_.disk), RectF(rect.X + rect.Width - 118, rect.Y + 14, 96, 22), value,
-                 colorFromHex(55, 50, 64), StringAlignmentFar);
+                 t.muted, StringAlignmentFar);
         drawText(g, L"Net " + formatPercent(metrics_.network), RectF(rect.X + rect.Width - 118, rect.Y + 40, 96, 22), value,
-                 colorFromHex(55, 50, 64), StringAlignmentFar);
+                 t.muted, StringAlignmentFar);
     }
 
     void drawFooter(Graphics& g, int width, int height) {
+        const auto t = theme();
         const REAL y = static_cast<REAL>(height - 48);
         for (int i = 0; i < 3; ++i) {
             RectF rect(width - 166.0f + i * 54.0f, y, 38, 38);
             auto path = roundedRect(rect, 8.0f);
-            SolidBrush bg(colorFromHex(255, 255, 255));
+            SolidBrush bg(t.buttonBg);
             g.FillPath(&bg, path.get());
-            Pen border(Color(60, 0, 0, 0), 1.0f);
+            Pen border(t.panelEdge, 1.0f);
             g.DrawPath(&border, path.get());
-            Pen pen(colorFromHex(24, 24, 24), 2.0f);
+            Pen pen(t.accent, 2.0f);
             pen.SetStartCap(LineCapRound);
             pen.SetEndCap(LineCapRound);
             const REAL cx = rect.X + rect.Width / 2.0f;
@@ -3000,14 +3183,16 @@ private:
     }
 
     void drawLegend(Graphics& g, REAL x, REAL y, const std::wstring& text, Color accent) {
+        const auto t = theme();
         SolidBrush dot(accent);
         g.FillEllipse(&dot, x, y + 4.0f, 8.0f, 8.0f);
         Font font = makeFont(12, FontStyleBold);
-        drawText(g, text, RectF(x + 14, y, 150, 18), font, colorFromHex(48, 48, 48));
+        drawText(g, text, RectF(x + 14, y, 150, 18), font, t.text);
     }
 
     void drawSparkline(Graphics& g, RectF rect, const SampleHistory& history, Color accent) {
-        Pen grid(Color(64, 0, 0, 0), 1.0f);
+        const auto t = theme();
+        Pen grid(t.panelEdge, 1.0f);
         g.DrawLine(&grid, rect.X, rect.Y + rect.Height, rect.X + rect.Width, rect.Y + rect.Height);
 
         if (history.values.size() < 2) {
@@ -3041,53 +3226,55 @@ private:
         fillPath.AddLine(rect.X + rect.Width, rect.Y + rect.Height, rect.X, rect.Y + rect.Height);
         fillPath.CloseFigure();
 
-        SolidBrush area(Color(24, 0, 0, 0));
+        SolidBrush area(t.sparkArea);
         Pen pen(accent, 2.0f);
         g.FillPath(&area, &fillPath);
         g.DrawPath(&pen, &linePath);
     }
 
     void drawProcessPanel(Graphics& g, RectF rect) {
+        const auto t = theme();
         drawPanel(g, rect);
         Font title = makeFont(18, FontStyleBold);
         Font header = makeFont(12, FontStyleBold);
         Font row = makeFont(13, FontStyleRegular);
 
         drawText(g, L"内存占用最高的进程", RectF(rect.X + 20, rect.Y + 18, rect.Width - 40, 28), title,
-                 colorFromHex(241, 245, 249));
-        drawText(g, L"进程", RectF(rect.X + 22, rect.Y + 62, 180, 20), header, colorFromHex(126, 140, 164));
-        drawText(g, L"PID", RectF(rect.X + rect.Width - 172, rect.Y + 62, 50, 20), header, colorFromHex(126, 140, 164));
-        drawText(g, L"内存", RectF(rect.X + rect.Width - 108, rect.Y + 62, 86, 20), header, colorFromHex(126, 140, 164),
+                 t.text);
+        drawText(g, L"进程", RectF(rect.X + 22, rect.Y + 62, 180, 20), header, t.muted);
+        drawText(g, L"PID", RectF(rect.X + rect.Width - 172, rect.Y + 62, 50, 20), header, t.muted);
+        drawText(g, L"内存", RectF(rect.X + rect.Width - 108, rect.Y + 62, 86, 20), header, t.muted,
                  StringAlignmentFar);
 
         REAL y = rect.Y + 90;
         const REAL rowHeight = 30;
         for (const auto& process : metrics_.topMemory) {
-            SolidBrush rowBg(Color(28, 255, 255, 255));
+            SolidBrush rowBg(t.buttonBg);
             if (static_cast<int>((y - rect.Y) / rowHeight) % 2 == 0) {
                 auto rowPath = roundedRect(RectF(rect.X + 14, y - 4, rect.Width - 28, rowHeight), 6.0f);
                 g.FillPath(&rowBg, rowPath.get());
             }
 
-            drawText(g, process.name, RectF(rect.X + 22, y, rect.Width - 230, 22), row, colorFromHex(221, 227, 237));
+            drawText(g, process.name, RectF(rect.X + 22, y, rect.Width - 230, 22), row, t.text);
 
             wchar_t pid[24];
             swprintf(pid, 24, L"%lu", process.pid);
-            drawText(g, pid, RectF(rect.X + rect.Width - 172, y, 50, 22), row, colorFromHex(166, 179, 199));
+            drawText(g, pid, RectF(rect.X + rect.Width - 172, y, 50, 22), row, t.subtle);
             drawText(g, formatBytes(static_cast<double>(process.memory)), RectF(rect.X + rect.Width - 128, y, 106, 22), row,
-                     colorFromHex(221, 227, 237), StringAlignmentFar);
+                     t.text, StringAlignmentFar);
             y += rowHeight;
         }
     }
 
     void drawInfoPanel(Graphics& g, RectF rect) {
+        const auto t = theme();
         drawPanel(g, rect);
         Font title = makeFont(18, FontStyleBold);
         Font label = makeFont(12, FontStyleBold);
         Font value = makeFont(15, FontStyleRegular);
 
         drawText(g, L"系统细节", RectF(rect.X + 20, rect.Y + 18, rect.Width - 40, 28), title,
-                 colorFromHex(241, 245, 249));
+                 t.text);
 
         REAL y = rect.Y + 66;
         drawInfoRow(g, rect, y, L"GPU", metrics_.gpuName, label, value);
@@ -3103,12 +3290,13 @@ private:
 
     void drawInfoRow(Graphics& g, RectF panel, REAL y, const std::wstring& labelText, const std::wstring& valueText,
                      Font& labelFont, Font& valueFont) {
+        const auto t = theme();
         RectF rowRect(panel.X + 16, y - 8, panel.Width - 32, 46);
         auto path = roundedRect(rowRect, 6.0f);
-        SolidBrush bg(Color(34, 255, 255, 255));
+        SolidBrush bg(t.buttonBg);
         g.FillPath(&bg, path.get());
-        drawText(g, labelText, RectF(panel.X + 28, y, panel.Width - 56, 16), labelFont, colorFromHex(126, 140, 164));
-        drawText(g, valueText, RectF(panel.X + 28, y + 17, panel.Width - 56, 22), valueFont, colorFromHex(230, 236, 245));
+        drawText(g, labelText, RectF(panel.X + 28, y, panel.Width - 56, 16), labelFont, t.muted);
+        drawText(g, valueText, RectF(panel.X + 28, y + 17, panel.Width - 56, 22), valueFont, t.text);
     }
 };
 

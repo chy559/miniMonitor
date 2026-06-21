@@ -13,6 +13,7 @@ It is a native Win32 application with no runtime dependency beyond Windows itsel
 - Optional Codex quota card using the local Codex ChatGPT sign-in token
 - System tray hover summary for CPU, GPU, memory, network, and Codex quota
 - Grouped tray menu with compact top-level actions and nested status, report, refresh, display, alert, tool, and startup settings
+- Four selectable UI themes: Mono, Ocean, Sakura, and Forest, with the choice saved between launches
 - Single-instance startup with remembered window position
 - Quick controls: tray left-click toggles the panel, `Ctrl+Shift+M` toggles it globally, `Esc` hides it, `Space` pauses/resumes refresh, `F5` refreshes now, and `Ctrl+C` copies status
 - Single-file executable build output
@@ -33,4 +34,4 @@ dist\MiniMonitor.exe
 
 Double-click `dist\MiniMonitor.exe`.
 
-When closed or minimized, the app hides to the Windows system tray. Left-click the tray icon to show or hide the panel. Right-click it to refresh immediately, enable high-usage alerts, adjust alert threshold, refresh interval and opacity, toggle the global hotkey or background low-frequency refresh, lock the panel position, open Task Manager, Resource Monitor, the app folder, or the reports folder, copy or export a current status summary, clean old reports, refresh Codex quota, pause updates, keep the panel on top, reset settings, reset the panel position, or toggle startup behavior.
+When closed or minimized, the app hides to the Windows system tray. Left-click the tray icon to show or hide the panel. Right-click it to refresh immediately, refresh Codex quota, open grouped status/report/settings menus, switch themes, tune refresh and alert behavior, open system tools, or change startup behavior.
