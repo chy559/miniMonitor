@@ -1284,6 +1284,7 @@ public:
             showPanel(false);
         }
         applyRefreshTimer();
+        showStartupNotice(!readBoolSetting(L"OnboardingShown", false));
         return true;
     }
 
@@ -1711,6 +1712,20 @@ private:
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
+    void showStartupNotice(bool firstRun) {
+        if (startHidden_) {
+            showTrayBalloon(L"MiniMonitor 正在后台运行",
+                            L"左键托盘图标显示面板，右键可查看资源详情、刷新 Codex 额度或调整启动设置。");
+        } else if (firstRun) {
+            showTrayBalloon(L"欢迎使用 MiniMonitor",
+                            L"左键托盘图标可隐藏/显示面板，右键可查看更多状态和快捷操作。");
+        }
+
+        if (firstRun) {
+            writeBoolSetting(L"OnboardingShown", true);
+        }
+    }
+
     void removeTrayIcon() {
         if (!hwnd_) {
             return;
@@ -1778,57 +1793,85 @@ private:
             updateTrayTip();
         }
 
+        HMENU statusMenu = CreatePopupMenu();
         appendInfoItem(menu, windowStateText());
         appendInfoItem(menu, L"CPU " + formatPercent(metrics_.cpu) +
+                             L"    MEM " + formatPercent(metrics_.memory) +
                              L"    GPU " + (metrics_.gpu >= 0.0 ? formatPercent(metrics_.gpu) : L"N/A"));
-        appendInfoItem(menu, L"内存 " + formatPercent(metrics_.memory) + L"  " +
-                             formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
-                             formatBytes(static_cast<double>(metrics_.memoryTotal)));
-        appendInfoItem(menu, L"网络 ↓ " + formatSpeed(metrics_.netDown) + L"    ↑ " + formatSpeed(metrics_.netUp));
-        appendInfoItem(menu, L"磁盘 Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
-                             L"    Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"));
-        appendInfoItem(menu, L"刷新间隔 " + refreshIntervalText());
-        appendInfoItem(menu, L"后台刷新 " + backgroundRefreshText());
-        appendInfoItem(menu, L"窗口透明度 " + opacityText());
-        appendInfoItem(menu, L"提醒阈值 " + alertThresholdText());
-        appendInfoItem(menu, trayQuotaText());
-        appendInfoItem(menu, trayTopProcessText());
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuShow, L"显示面板");
         AppendMenuW(menu, MF_STRING, kMenuHide, L"隐藏到后台");
         AppendMenuW(menu, MF_STRING, kMenuRefreshNow, L"立即刷新");
-        AppendMenuW(menu, MF_STRING, kMenuCopyStatus, L"复制当前状态");
-        AppendMenuW(menu, MF_STRING, kMenuExportStatusReport, L"导出状态报告");
-        AppendMenuW(menu, MF_STRING, kMenuOpenReportsFolder, L"打开报告目录");
-        AppendMenuW(menu, MF_STRING, kMenuClearReports, L"清理状态报告");
         AppendMenuW(menu, MF_STRING, kMenuRefreshQuota, L"刷新 Codex 额度");
-        AppendMenuW(menu, MF_STRING, kMenuOpenTaskManager, L"打开任务管理器");
-        AppendMenuW(menu, MF_STRING, kMenuOpenResourceMonitor, L"打开资源监视器");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING | (paused_ ? MF_CHECKED : MF_UNCHECKED), kMenuTogglePause, paused_ ? L"继续刷新" : L"暂停刷新");
-        AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAlwaysOnTop, L"窗口置顶");
-        AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleLockPosition, L"锁定窗口位置");
-        AppendMenuW(menu, MF_STRING | (highUsageAlerts_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleHighUsageAlerts, L"高占用提醒");
-        AppendMenuW(menu, MF_STRING | (globalHotkeyRegistered_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleGlobalHotkey, L"全局快捷键 Ctrl+Shift+M");
-        AppendMenuW(menu, MF_STRING | (backgroundEcoMode_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleBackgroundEcoMode, L"后台低频刷新");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 1000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval1s, L"刷新间隔: 1 秒");
-        AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 2000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval2s, L"刷新间隔: 2 秒");
-        AppendMenuW(menu, MF_STRING | (refreshIntervalMs_ == 5000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval5s, L"刷新间隔: 5 秒");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING | (highUsageAlertThreshold_ == 80 ? MF_CHECKED : MF_UNCHECKED), kMenuAlertThreshold80, L"提醒阈值: 80%");
-        AppendMenuW(menu, MF_STRING | (highUsageAlertThreshold_ == 90 ? MF_CHECKED : MF_UNCHECKED), kMenuAlertThreshold90, L"提醒阈值: 90%");
-        AppendMenuW(menu, MF_STRING | (highUsageAlertThreshold_ == 95 ? MF_CHECKED : MF_UNCHECKED), kMenuAlertThreshold95, L"提醒阈值: 95%");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING | (windowOpacity_ == 255 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity100, L"透明度: 100%");
-        AppendMenuW(menu, MF_STRING | (windowOpacity_ == 230 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity90, L"透明度: 90%");
-        AppendMenuW(menu, MF_STRING | (windowOpacity_ == 205 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity80, L"透明度: 80%");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING | (startHidden_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleStartHidden, L"启动时隐藏面板");
-        AppendMenuW(menu, MF_STRING | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAutoStart, L"开机自启");
-        AppendMenuW(menu, MF_STRING, kMenuResetPosition, L"重置窗口位置");
-        AppendMenuW(menu, MF_STRING, kMenuOpenAppFolder, L"打开程序目录");
-        AppendMenuW(menu, MF_STRING, kMenuResetSettings, L"恢复默认设置");
+
+        appendInfoItem(statusMenu, L"CPU " + formatPercent(metrics_.cpu) +
+                                   L"    GPU " + (metrics_.gpu >= 0.0 ? formatPercent(metrics_.gpu) : L"N/A"));
+        appendInfoItem(statusMenu, L"内存 " + formatPercent(metrics_.memory) + L"  " +
+                                   formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
+                                   formatBytes(static_cast<double>(metrics_.memoryTotal)));
+        appendInfoItem(statusMenu, L"网络 ↓ " + formatSpeed(metrics_.netDown) + L"    ↑ " + formatSpeed(metrics_.netUp));
+        appendInfoItem(statusMenu, L"磁盘 Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
+                                   L"    Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"));
+        appendInfoItem(statusMenu, trayQuotaText());
+        appendInfoItem(statusMenu, trayTopProcessText());
+        appendInfoItem(statusMenu, trayTopMemoryText());
+        appendInfoItem(statusMenu, trayTopGpuText());
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(statusMenu), L"状态详情");
+
+        HMENU reportMenu = CreatePopupMenu();
+        AppendMenuW(reportMenu, MF_STRING, kMenuCopyStatus, L"复制当前状态");
+        AppendMenuW(reportMenu, MF_STRING, kMenuExportStatusReport, L"导出状态报告");
+        AppendMenuW(reportMenu, MF_STRING, kMenuOpenReportsFolder, L"打开报告目录");
+        AppendMenuW(reportMenu, MF_STRING, kMenuClearReports, L"清理状态报告");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(reportMenu), L"报告与复制");
+
+        HMENU refreshMenu = CreatePopupMenu();
+        appendInfoItem(refreshMenu, L"当前刷新间隔 " + refreshIntervalText());
+        appendInfoItem(refreshMenu, L"后台刷新 " + backgroundRefreshText());
+        AppendMenuW(refreshMenu, MF_STRING | (paused_ ? MF_CHECKED : MF_UNCHECKED), kMenuTogglePause, paused_ ? L"继续刷新" : L"暂停刷新");
+        AppendMenuW(refreshMenu, MF_STRING | (backgroundEcoMode_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleBackgroundEcoMode, L"后台低频刷新");
+        AppendMenuW(refreshMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(refreshMenu, MF_STRING | (refreshIntervalMs_ == 1000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval1s, L"1 秒");
+        AppendMenuW(refreshMenu, MF_STRING | (refreshIntervalMs_ == 2000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval2s, L"2 秒");
+        AppendMenuW(refreshMenu, MF_STRING | (refreshIntervalMs_ == 5000 ? MF_CHECKED : MF_UNCHECKED), kMenuRefreshInterval5s, L"5 秒");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(refreshMenu), L"刷新设置");
+
+        HMENU displayMenu = CreatePopupMenu();
+        appendInfoItem(displayMenu, L"窗口透明度 " + opacityText());
+        AppendMenuW(displayMenu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAlwaysOnTop, L"窗口置顶");
+        AppendMenuW(displayMenu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleLockPosition, L"锁定窗口位置");
+        AppendMenuW(displayMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(displayMenu, MF_STRING | (windowOpacity_ == 255 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity100, L"透明度: 100%");
+        AppendMenuW(displayMenu, MF_STRING | (windowOpacity_ == 230 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity90, L"透明度: 90%");
+        AppendMenuW(displayMenu, MF_STRING | (windowOpacity_ == 205 ? MF_CHECKED : MF_UNCHECKED), kMenuOpacity80, L"透明度: 80%");
+        AppendMenuW(displayMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(displayMenu, MF_STRING, kMenuResetPosition, L"重置窗口位置");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(displayMenu), L"显示与窗口");
+
+        HMENU alertMenu = CreatePopupMenu();
+        appendInfoItem(alertMenu, L"提醒阈值 " + alertThresholdText());
+        AppendMenuW(alertMenu, MF_STRING | (highUsageAlerts_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleHighUsageAlerts, L"高占用提醒");
+        AppendMenuW(alertMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(alertMenu, MF_STRING | (highUsageAlertThreshold_ == 80 ? MF_CHECKED : MF_UNCHECKED), kMenuAlertThreshold80, L"80%");
+        AppendMenuW(alertMenu, MF_STRING | (highUsageAlertThreshold_ == 90 ? MF_CHECKED : MF_UNCHECKED), kMenuAlertThreshold90, L"90%");
+        AppendMenuW(alertMenu, MF_STRING | (highUsageAlertThreshold_ == 95 ? MF_CHECKED : MF_UNCHECKED), kMenuAlertThreshold95, L"95%");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(alertMenu), L"提醒");
+
+        HMENU toolMenu = CreatePopupMenu();
+        AppendMenuW(toolMenu, MF_STRING, kMenuOpenTaskManager, L"打开任务管理器");
+        AppendMenuW(toolMenu, MF_STRING, kMenuOpenResourceMonitor, L"打开资源监视器");
+        AppendMenuW(toolMenu, MF_STRING, kMenuOpenAppFolder, L"打开程序目录");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(toolMenu), L"系统工具");
+
+        HMENU startupMenu = CreatePopupMenu();
+        AppendMenuW(startupMenu, MF_STRING | (startHidden_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleStartHidden, L"启动时隐藏面板");
+        AppendMenuW(startupMenu, MF_STRING | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAutoStart, L"开机自启");
+        AppendMenuW(startupMenu, MF_STRING | (globalHotkeyRegistered_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleGlobalHotkey, L"全局快捷键 Ctrl+Shift+M");
+        AppendMenuW(startupMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(startupMenu, MF_STRING, kMenuResetSettings, L"恢复默认设置");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(startupMenu), L"启动与偏好");
+
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuExit, L"退出");
     }
@@ -2382,6 +2425,32 @@ private:
         return L"Top CPU: " + top.name + L" " + formatOneDecimalPercent(top.cpu);
     }
 
+    std::wstring trayTopMemoryText() {
+        if (metrics_.topMemory.empty()) {
+            return L"Top Memory: N/A";
+        }
+        const auto& top = metrics_.topMemory.front();
+        return L"Top Memory: " + top.name + L" " + formatBytes(static_cast<double>(top.memory));
+    }
+
+    std::wstring trayTopGpuText() {
+        if (metrics_.topGpu.empty()) {
+            return L"Top GPU: N/A";
+        }
+        const auto& top = metrics_.topGpu.front();
+        return L"Top GPU: " + top.name + L" " + (top.gpu >= 0.0 ? formatOneDecimalPercent(top.gpu) : L"N/A");
+    }
+
+    std::wstring compactProcessName(const std::wstring& name, size_t maxChars) {
+        if (name.size() <= maxChars) {
+            return name;
+        }
+        if (maxChars <= 3) {
+            return name.substr(0, maxChars);
+        }
+        return name.substr(0, maxChars - 3) + L"...";
+    }
+
     std::wstring trayTipText() {
         std::wstring tip;
         if (paused_) {
@@ -2396,6 +2465,13 @@ private:
             tip += L"\nCodex 5h " + metrics_.quota.firstUsage + L"  Weekly " + metrics_.quota.secondUsage;
         } else {
             tip += L"\nCodex " + metrics_.quota.status;
+        }
+        if (!metrics_.topCpu.empty()) {
+            tip += L"\nTop CPU " + compactProcessName(metrics_.topCpu.front().name, 18) + L" " +
+                   formatOneDecimalPercent(metrics_.topCpu.front().cpu);
+        }
+        if (!metrics_.topMemory.empty()) {
+            tip += L"  MEM " + compactProcessName(metrics_.topMemory.front().name, 12);
         }
         return trimForTip(tip);
     }
@@ -2463,6 +2539,16 @@ private:
         updateHistory();
         updateTrayTip();
         InvalidateRect(hwnd_, nullptr, FALSE);
+        if (metrics_.quota.available) {
+            showTrayBalloon(L"Codex 额度已更新",
+                            metrics_.quota.firstLabel + L" " + metrics_.quota.firstUsage + L" / " +
+                                metrics_.quota.fiveHourReset + L"\n" +
+                                metrics_.quota.secondLabel + L" " + metrics_.quota.secondUsage + L" / " +
+                                metrics_.quota.sevenDayReset);
+        } else {
+            showTrayBalloon(L"Codex 额度刷新失败",
+                            metrics_.quota.status + L"。请确认 Codex/ChatGPT 已登录后再刷新。");
+        }
     }
 
     Font makeFont(REAL size, INT style = FontStyleRegular) {

@@ -12,7 +12,7 @@ It is a native Win32 application with no runtime dependency beyond Windows itsel
 - Top CPU, memory, and GPU process summaries
 - Optional Codex quota card using the local Codex ChatGPT sign-in token
 - System tray hover summary for CPU, GPU, memory, network, and Codex quota
-- Rich tray menu with status details, copy/export summary, reports folder shortcut, report cleanup, manual refresh, quota refresh, Task Manager and Resource Monitor shortcuts, high-usage alerts with adjustable threshold, global hotkey toggle, background low-frequency refresh, pause/resume, refresh interval, opacity control, window lock, always-on-top, position reset, app folder shortcut, settings reset, startup-hidden toggle, and auto-start toggle
+- Grouped tray menu with compact top-level actions and nested status, report, refresh, display, alert, tool, and startup settings
 - Single-instance startup with remembered window position
 - Quick controls: tray left-click toggles the panel, `Ctrl+Shift+M` toggles it globally, `Esc` hides it, `Space` pauses/resumes refresh, `F5` refreshes now, and `Ctrl+C` copies status
 - Single-file executable build output
