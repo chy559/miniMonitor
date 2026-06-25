@@ -11,11 +11,15 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
 
 #include <windows.h>
 #include <windowsx.h>
 #include <gdiplus.h>
 #include <iphlpapi.h>
+#include <netioapi.h>
 #include <psapi.h>
 #include <tlhelp32.h>
 #include <pdh.h>
@@ -23,10 +27,14 @@
 #include <winhttp.h>
 #include <shellapi.h>
 
+#include "monitor_logic.h"
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cwctype>
@@ -34,16 +42,25 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Gdiplus;
+using monitor_logic::extractFirstArrayString;
+using monitor_logic::extractJsonObjectForKey;
+using monitor_logic::extractJsonString;
+using monitor_logic::extractNumberAfter;
+using monitor_logic::findJsonCloser;
 
 namespace {
 
 constexpr UINT_PTR kRefreshTimer = 1001;
 constexpr UINT kTrayMessage = WM_APP + 42;
+constexpr UINT kMetricsReadyMessage = WM_APP + 43;
+constexpr UINT kQuotaReadyMessage = WM_APP + 44;
 constexpr UINT kMenuShow = 1;
 constexpr UINT kMenuExit = 2;
 constexpr UINT kMenuHide = 3;
@@ -79,6 +96,8 @@ constexpr UINT kMenuThemeMono = 32;
 constexpr UINT kMenuThemeOcean = 33;
 constexpr UINT kMenuThemeSakura = 34;
 constexpr UINT kMenuThemeForest = 35;
+constexpr UINT kMenuDiskBase = 1000;
+constexpr UINT kMenuDiskLast = kMenuDiskBase + 25;
 constexpr int kAppIconResource = 101;
 constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
 constexpr wchar_t kAppTitle[] = L"MiniMonitor";
@@ -177,6 +196,7 @@ struct Metrics {
     unsigned long long memoryTotal = 0;
     unsigned long long diskUsed = 0;
     unsigned long long diskTotal = 0;
+    std::wstring diskRoot = L"C:\\";
     std::wstring gpuName = L"N/A";
     std::vector<ProcessRow> topMemory;
     std::vector<ProcessRow> topCpu;
@@ -274,152 +294,6 @@ bool readUtf8File(const std::wstring& path, std::string& out) {
     bool ok = ReadFile(file, out.data(), static_cast<DWORD>(out.size()), &read, nullptr) && read == out.size();
     CloseHandle(file);
     return ok;
-}
-
-std::string extractJsonString(const std::string& json, const std::string& key) {
-    const std::string needle = "\"" + key + "\"";
-    size_t keyPos = json.find(needle);
-    if (keyPos == std::string::npos) {
-        return "";
-    }
-    size_t colon = json.find(':', keyPos + needle.size());
-    if (colon == std::string::npos) {
-        return "";
-    }
-    size_t quote = json.find('"', colon + 1);
-    if (quote == std::string::npos) {
-        return "";
-    }
-    std::string out;
-    bool escape = false;
-    for (size_t i = quote + 1; i < json.size(); ++i) {
-        char ch = json[i];
-        if (escape) {
-            out.push_back(ch);
-            escape = false;
-        } else if (ch == '\\') {
-            escape = true;
-        } else if (ch == '"') {
-            break;
-        } else {
-            out.push_back(ch);
-        }
-    }
-    return out;
-}
-
-bool extractNumberAfter(const std::string& json, size_t start, const std::vector<std::string>& keys, double& value) {
-    size_t best = std::string::npos;
-    for (const auto& key : keys) {
-        size_t pos = json.find("\"" + key + "\"", start);
-        if (pos != std::string::npos && (best == std::string::npos || pos < best)) {
-            best = pos;
-        }
-    }
-    if (best == std::string::npos || best > start + 900) {
-        return false;
-    }
-    size_t colon = json.find(':', best);
-    if (colon == std::string::npos) {
-        return false;
-    }
-    size_t begin = json.find_first_of("-0123456789", colon + 1);
-    if (begin == std::string::npos || begin > colon + 40) {
-        return false;
-    }
-    char* end = nullptr;
-    value = std::strtod(json.c_str() + begin, &end);
-    return end && end != json.c_str() + begin;
-}
-
-size_t findJsonCloser(const std::string& json, size_t openPos, char openChar, char closeChar) {
-    if (openPos >= json.size() || json[openPos] != openChar) {
-        return std::string::npos;
-    }
-
-    int depth = 0;
-    bool inString = false;
-    bool escape = false;
-    for (size_t i = openPos; i < json.size(); ++i) {
-        const char ch = json[i];
-        if (inString) {
-            if (escape) {
-                escape = false;
-            } else if (ch == '\\') {
-                escape = true;
-            } else if (ch == '"') {
-                inString = false;
-            }
-            continue;
-        }
-
-        if (ch == '"') {
-            inString = true;
-        } else if (ch == openChar) {
-            ++depth;
-        } else if (ch == closeChar) {
-            --depth;
-            if (depth == 0) {
-                return i;
-            }
-        }
-    }
-    return std::string::npos;
-}
-
-std::string extractJsonObjectForKey(const std::string& json, const std::string& key) {
-    const std::string needle = "\"" + key + "\"";
-    size_t keyPos = json.find(needle);
-    if (keyPos == std::string::npos) {
-        return "";
-    }
-    size_t colon = json.find(':', keyPos + needle.size());
-    if (colon == std::string::npos) {
-        return "";
-    }
-    size_t open = json.find('{', colon + 1);
-    if (open == std::string::npos) {
-        return "";
-    }
-    size_t close = findJsonCloser(json, open, '{', '}');
-    if (close == std::string::npos) {
-        return "";
-    }
-    return json.substr(open, close - open + 1);
-}
-
-std::string extractFirstArrayString(const std::string& json, const std::string& key) {
-    const std::string needle = "\"" + key + "\"";
-    size_t keyPos = json.find(needle);
-    if (keyPos == std::string::npos) {
-        return "";
-    }
-    size_t colon = json.find(':', keyPos + needle.size());
-    size_t open = colon == std::string::npos ? std::string::npos : json.find('[', colon + 1);
-    if (open == std::string::npos) {
-        return "";
-    }
-    size_t quote = json.find('"', open + 1);
-    if (quote == std::string::npos) {
-        return "";
-    }
-
-    std::string out;
-    bool escape = false;
-    for (size_t i = quote + 1; i < json.size(); ++i) {
-        const char ch = json[i];
-        if (escape) {
-            out.push_back(ch);
-            escape = false;
-        } else if (ch == '\\') {
-            escape = true;
-        } else if (ch == '"') {
-            break;
-        } else {
-            out.push_back(ch);
-        }
-    }
-    return out;
 }
 
 std::wstring formatResetDetail(double value) {
@@ -538,6 +412,16 @@ void enableDpiAwareness() {
     FreeLibrary(user32);
 }
 
+UINT systemDpi() {
+    HDC screen = GetDC(nullptr);
+    if (!screen) {
+        return 96;
+    }
+    const int dpi = GetDeviceCaps(screen, LOGPIXELSX);
+    ReleaseDC(nullptr, screen);
+    return dpi > 0 ? static_cast<UINT>(dpi) : 96;
+}
+
 Color colorFromHex(BYTE r, BYTE g, BYTE b, BYTE a = 255) {
     return Color(a, r, g, b);
 }
@@ -622,6 +506,7 @@ class SystemSampler {
 public:
     SystemSampler() {
         queryDiskCounters();
+        queryNetworkCounters();
         queryGpuCounters();
         gpuName_ = detectGpuName();
         SYSTEM_INFO info{};
@@ -633,12 +518,15 @@ public:
         if (pdhQuery_) {
             PdhCloseQuery(pdhQuery_);
         }
+        if (networkQuery_) {
+            PdhCloseQuery(networkQuery_);
+        }
         if (gpuQuery_) {
             PdhCloseQuery(gpuQuery_);
         }
     }
 
-    Metrics collect(bool forceCodexQuota = false) {
+    Metrics collect() {
         Metrics metrics;
         metrics.cpu = sampleCpu();
         sampleMemory(metrics);
@@ -648,8 +536,16 @@ public:
         metrics.gpuName = gpuName_;
         sampleProcesses(metrics);
         sampleGpuProcesses(metrics);
-        sampleCodexQuota(metrics, forceCodexQuota);
         return metrics;
+    }
+
+    void setDiskRoot(const std::wstring& root) {
+        const std::wstring next = root.empty() ? L"C:\\" : root;
+        if (diskRoot_ == next) {
+            return;
+        }
+        diskRoot_ = next;
+        queryDiskCounters();
     }
 
 private:
@@ -658,13 +554,16 @@ private:
     PDH_HQUERY pdhQuery_ = nullptr;
     PDH_HCOUNTER diskReadCounter_ = nullptr;
     PDH_HCOUNTER diskWriteCounter_ = nullptr;
+    PDH_HQUERY networkQuery_ = nullptr;
+    PDH_HCOUNTER networkInCounter_ = nullptr;
+    PDH_HCOUNTER networkOutCounter_ = nullptr;
     PDH_HQUERY gpuQuery_ = nullptr;
     PDH_HCOUNTER gpuCounter_ = nullptr;
     std::wstring gpuName_;
     DWORD processorCount_ = 1;
     ULONGLONG processSampleTick_ = 0;
     std::map<DWORD, ULONGLONG> previousProcessTimes_;
-    CodexQuota cachedQuota_;
+    std::wstring diskRoot_ = L"C:\\";
 
     double sampleCpu() {
         FILETIME idleTime{}, kernelTime{}, userTime{};
@@ -706,15 +605,20 @@ private:
 
     void sampleDisk(Metrics& metrics) {
         ULARGE_INTEGER freeBytes{}, totalBytes{}, totalFreeBytes{};
-        if (!GetDiskFreeSpaceExW(L"C:\\", &freeBytes, &totalBytes, &totalFreeBytes)) {
+        if (!GetDiskFreeSpaceExW(diskRoot_.c_str(), &freeBytes, &totalBytes, &totalFreeBytes)) {
             return;
         }
+        metrics.diskRoot = diskRoot_;
         metrics.diskTotal = totalBytes.QuadPart;
         metrics.diskUsed = totalBytes.QuadPart - totalFreeBytes.QuadPart;
         metrics.disk = static_cast<double>(metrics.diskUsed) / static_cast<double>(metrics.diskTotal);
     }
 
     void sampleNetwork(Metrics& metrics) {
+        if (sampleNetworkPdh(metrics)) {
+            return;
+        }
+
         unsigned long long inBytes = 0;
         unsigned long long outBytes = 0;
         DWORD tableSize = 0;
@@ -736,19 +640,116 @@ private:
         NetworkSnapshot current{inBytes, outBytes, GetTickCount64(), true};
         if (network_.valid && current.tick > network_.tick) {
             const double seconds = static_cast<double>(current.tick - network_.tick) / 1000.0;
-            if (current.inBytes >= network_.inBytes) {
-                metrics.netDown = static_cast<double>(current.inBytes - network_.inBytes) / seconds;
-            }
-            if (current.outBytes >= network_.outBytes) {
-                metrics.netUp = static_cast<double>(current.outBytes - network_.outBytes) / seconds;
-            }
+            const unsigned long long inDelta = monitor_logic::counterDelta32(current.inBytes, network_.inBytes);
+            const unsigned long long outDelta = monitor_logic::counterDelta32(current.outBytes, network_.outBytes);
+            metrics.netDown = static_cast<double>(inDelta) / seconds;
+            metrics.netUp = static_cast<double>(outDelta) / seconds;
         }
         network_ = current;
         const double peak = 20.0 * 1024.0 * 1024.0;
         metrics.network = std::clamp((metrics.netDown + metrics.netUp) / peak, 0.0, 1.0);
     }
 
+    void queryNetworkCounters() {
+        if (PdhOpenQueryW(nullptr, 0, &networkQuery_) != ERROR_SUCCESS) {
+            networkQuery_ = nullptr;
+            return;
+        }
+
+        using AddEnglishCounter = PDH_STATUS(WINAPI*)(PDH_HQUERY, LPCWSTR, DWORD_PTR, PDH_HCOUNTER*);
+        HMODULE pdh = LoadLibraryW(L"pdh.dll");
+        AddEnglishCounter addEnglishCounter = nullptr;
+        if (pdh) {
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
+            addEnglishCounter = reinterpret_cast<AddEnglishCounter>(GetProcAddress(pdh, "PdhAddEnglishCounterW"));
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+        }
+        const auto addCounter = addEnglishCounter ? addEnglishCounter : PdhAddCounterW;
+
+        const auto inStatus = addCounter(
+            networkQuery_, L"\\Network Interface(*)\\Bytes Received/sec", 0, &networkInCounter_);
+        const auto outStatus = addCounter(
+            networkQuery_, L"\\Network Interface(*)\\Bytes Sent/sec", 0, &networkOutCounter_);
+        if (pdh) {
+            FreeLibrary(pdh);
+        }
+
+        if (inStatus != ERROR_SUCCESS || outStatus != ERROR_SUCCESS) {
+            PdhCloseQuery(networkQuery_);
+            networkQuery_ = nullptr;
+            networkInCounter_ = nullptr;
+            networkOutCounter_ = nullptr;
+            return;
+        }
+        PdhCollectQueryData(networkQuery_);
+    }
+
+    bool sampleNetworkPdh(Metrics& metrics) {
+        if (!networkQuery_ || !networkInCounter_ || !networkOutCounter_) {
+            return false;
+        }
+        if (PdhCollectQueryData(networkQuery_) != ERROR_SUCCESS) {
+            return false;
+        }
+
+        double inBytes = 0.0;
+        double outBytes = 0.0;
+        if (!sumFormattedCounterArray(networkInCounter_, inBytes) ||
+            !sumFormattedCounterArray(networkOutCounter_, outBytes)) {
+            return false;
+        }
+
+        metrics.netDown = std::max(0.0, inBytes);
+        metrics.netUp = std::max(0.0, outBytes);
+        const double peak = 20.0 * 1024.0 * 1024.0;
+        metrics.network = std::clamp((metrics.netDown + metrics.netUp) / peak, 0.0, 1.0);
+        return true;
+    }
+
+    bool sumFormattedCounterArray(PDH_HCOUNTER counter, double& total) {
+        DWORD bufferSize = 0;
+        DWORD itemCount = 0;
+        PDH_STATUS status = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bufferSize, &itemCount, nullptr);
+        if (status != static_cast<PDH_STATUS>(PDH_MORE_DATA) || bufferSize == 0 || itemCount == 0) {
+            return false;
+        }
+
+        std::vector<BYTE> buffer(bufferSize);
+        auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+        status = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bufferSize, &itemCount, items);
+        if (status != ERROR_SUCCESS) {
+            return false;
+        }
+
+        total = 0.0;
+        for (DWORD i = 0; i < itemCount; ++i) {
+            if (items[i].FmtValue.CStatus != ERROR_SUCCESS || !items[i].szName) {
+                continue;
+            }
+            std::wstring name = items[i].szName;
+            std::transform(name.begin(), name.end(), name.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(towlower(ch));
+            });
+            if (name.find(L"loopback") != std::wstring::npos) {
+                continue;
+            }
+            total += std::max(0.0, items[i].FmtValue.doubleValue);
+        }
+        return true;
+    }
+
     void queryDiskCounters() {
+        if (pdhQuery_) {
+            PdhCloseQuery(pdhQuery_);
+            pdhQuery_ = nullptr;
+            diskReadCounter_ = nullptr;
+            diskWriteCounter_ = nullptr;
+        }
         if (PdhOpenQueryW(nullptr, 0, &pdhQuery_) != ERROR_SUCCESS) {
             pdhQuery_ = nullptr;
             return;
@@ -769,10 +770,16 @@ private:
         }
         const auto addCounter = addEnglishCounter ? addEnglishCounter : PdhAddCounterW;
 
+        std::wstring instance = diskRoot_.size() >= 2 ? diskRoot_.substr(0, 2) : L"C:";
+        const std::wstring readPath = L"\\LogicalDisk(" + instance + L")\\Disk Read Bytes/sec";
+        const std::wstring writePath = L"\\LogicalDisk(" + instance + L")\\Disk Write Bytes/sec";
         const auto readStatus = addCounter(
-            pdhQuery_, L"\\PhysicalDisk(_Total)\\Disk Read Bytes/sec", 0, &diskReadCounter_);
+            pdhQuery_, readPath.c_str(), 0, &diskReadCounter_);
         const auto writeStatus = addCounter(
-            pdhQuery_, L"\\PhysicalDisk(_Total)\\Disk Write Bytes/sec", 0, &diskWriteCounter_);
+            pdhQuery_, writePath.c_str(), 0, &diskWriteCounter_);
+        if (pdh) {
+            FreeLibrary(pdh);
+        }
 
         if (readStatus != ERROR_SUCCESS || writeStatus != ERROR_SUCCESS) {
             PdhCloseQuery(pdhQuery_);
@@ -936,14 +943,13 @@ private:
             return;
         }
 
-        std::map<DWORD, double> usageByPid;
-        double totalGpu = 0.0;
+        std::vector<std::pair<std::uint32_t, double>> samples;
+        samples.reserve(itemCount);
         for (DWORD i = 0; i < itemCount; ++i) {
             if (items[i].FmtValue.CStatus != ERROR_SUCCESS || !items[i].szName) {
                 continue;
             }
             const double usage = std::max(0.0, items[i].FmtValue.doubleValue);
-            totalGpu += usage;
 
             std::wstring instance = items[i].szName;
             size_t pidPos = instance.find(L"pid_");
@@ -956,20 +962,19 @@ private:
                 pid = pid * 10 + static_cast<DWORD>(instance[pidPos] - L'0');
                 ++pidPos;
             }
-            if (pid != 0) {
-                usageByPid[pid] += usage;
-            }
+            samples.emplace_back(pid, usage);
         }
-        metrics.gpu = std::clamp(totalGpu / 100.0, 0.0, 1.0);
+        const auto aggregate = monitor_logic::aggregateGpuSamples(samples);
+        metrics.gpu = aggregate.overall / 100.0;
 
-        for (const auto& [pid, gpu] : usageByPid) {
+        for (const auto& [rawPid, gpu] : aggregate.byProcess) {
             if (gpu <= 0.05) {
                 continue;
             }
             ProcessRow row;
-            row.pid = pid;
+            row.pid = static_cast<DWORD>(rawPid);
             row.gpu = gpu;
-            row.name = processName(pid);
+            row.name = processName(row.pid);
             metrics.topGpu.push_back(row);
         }
         std::sort(metrics.topGpu.begin(), metrics.topGpu.end(), [](const ProcessRow& a, const ProcessRow& b) {
@@ -996,20 +1001,15 @@ private:
         CloseHandle(process);
         return name;
     }
+};
 
-    void sampleCodexQuota(Metrics& metrics, bool forceRefresh) {
-        const ULONGLONG now = GetTickCount64();
-        if (!forceRefresh && cachedQuota_.checked && now >= cachedQuota_.lastCheckedTick &&
-            now - cachedQuota_.lastCheckedTick < 5ULL * 60ULL * 1000ULL) {
-            metrics.quota = cachedQuota_;
-            return;
-        }
-
-        cachedQuota_ = fetchCodexQuota(forceRefresh);
-        cachedQuota_.lastCheckedTick = now;
-        metrics.quota = cachedQuota_;
+class CodexQuotaClient {
+public:
+    CodexQuota fetch(bool forceRefresh) {
+        return fetchCodexQuota(forceRefresh);
     }
 
+private:
     CodexQuota fetchCodexQuota(bool forceRefresh) {
         CodexQuota quota;
         quota.checked = true;
@@ -1248,6 +1248,7 @@ public:
     AppWindow(HINSTANCE instance) : instance_(instance), icon_(loadAppIcon(instance)) {}
 
     ~AppWindow() {
+        stopWorkers();
         removeTrayIcon();
         if (icon_) {
             DestroyIcon(icon_);
@@ -1271,8 +1272,10 @@ public:
 
         RECT workArea{};
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
-        const int availableHeight = static_cast<int>(workArea.bottom - workArea.top - 32);
-        const int panelHeight = std::min(kPanelHeight, std::max(560, availableHeight));
+        dpi_ = systemDpi();
+        const int panelWidth = scalePx(kPanelWidth);
+        const int availableHeight = static_cast<int>(workArea.bottom - workArea.top - scalePx(32));
+        const int panelHeight = std::min(scalePx(kPanelHeight), std::max(scalePx(560), availableHeight));
         startHidden_ = readBoolSetting(L"StartHidden", false);
         alwaysOnTop_ = readBoolSetting(L"AlwaysOnTop", false);
         paused_ = readBoolSetting(L"Paused", false);
@@ -1284,7 +1287,8 @@ public:
         refreshIntervalMs_ = sanitizeRefreshInterval(readDwordSetting(L"RefreshIntervalMs", kDefaultRefreshIntervalMs));
         windowOpacity_ = sanitizeWindowOpacity(readDwordSetting(L"WindowOpacity", 255));
         theme_ = sanitizeTheme(readDwordSetting(L"Theme", static_cast<DWORD>(UiTheme::Mono)));
-        POINT panelPos = startupPanelPosition(workArea, panelHeight);
+        diskDriveLetter_ = sanitizeDiskDrive(readDwordSetting(L"DiskDrive", static_cast<DWORD>(systemDriveLetter())));
+        POINT panelPos = startupPanelPosition(workArea, panelWidth, panelHeight);
 
         hwnd_ = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_LAYERED | (alwaysOnTop_ ? WS_EX_TOPMOST : 0),
@@ -1293,7 +1297,7 @@ public:
             WS_POPUP,
             panelPos.x,
             panelPos.y,
-            kPanelWidth,
+            panelWidth,
             panelHeight,
             nullptr,
             nullptr,
@@ -1304,14 +1308,13 @@ public:
             return false;
         }
 
-        SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, kPanelWidth, panelHeight, 24, 24), TRUE);
+        applyWindowRegion();
         applyWindowOpacity();
         applyGlobalHotkey(false);
         addTrayIcon();
-        metrics_ = sampler_.collect();
-        updateHistory();
-        checkHighUsageAlerts();
         updateTrayTip();
+        startWorkers();
+        requestMetricsSample(false);
         if (startHidden_) {
             hidePanel();
         } else {
@@ -1319,6 +1322,7 @@ public:
         }
         applyRefreshTimer();
         showStartupNotice(!readBoolSetting(L"OnboardingShown", false));
+        startCodexQuotaRefresh(false, false);
         return true;
     }
 
@@ -1326,7 +1330,7 @@ private:
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
     HICON icon_ = nullptr;
-    SystemSampler sampler_;
+    UINT dpi_ = 96;
     Metrics metrics_;
     std::wstring machineName_ = computerName();
     SampleHistory cpuHistory_;
@@ -1343,10 +1347,29 @@ private:
     bool globalHotkeyRegistered_ = false;
     bool backgroundEcoMode_ = false;
     UiTheme theme_ = UiTheme::Mono;
+    wchar_t diskDriveLetter_ = L'C';
     DWORD highUsageAlertThreshold_ = kDefaultHighUsageAlertThreshold;
     UINT refreshIntervalMs_ = kDefaultRefreshIntervalMs;
     BYTE windowOpacity_ = 255;
     ULONGLONG lastHighUsageAlertTick_ = 0;
+    bool quotaRefreshInProgress_ = false;
+    std::thread metricsWorker_;
+    std::thread quotaWorker_;
+    std::mutex workerMutex_;
+    std::condition_variable metricsCv_;
+    std::condition_variable quotaCv_;
+    bool workersStarted_ = false;
+    bool workersStopping_ = false;
+    bool metricsRequested_ = false;
+    bool metricsAnnounceRequested_ = false;
+    bool quotaRequested_ = false;
+    bool quotaForceRequested_ = false;
+    bool quotaAnnounceRequested_ = false;
+    bool readyMetricsAnnounce_ = false;
+    bool readyQuotaAnnounce_ = false;
+    std::wstring workerDiskRoot_ = L"C:\\";
+    std::unique_ptr<Metrics> readyMetrics_;
+    std::unique_ptr<CodexQuota> readyQuota_;
 
     static AppWindow* fromWindow(HWND hwnd) {
         return reinterpret_cast<AppWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -1374,11 +1397,7 @@ private:
                 if (paused_) {
                     return 0;
                 }
-                metrics_ = sampler_.collect();
-                updateHistory();
-                checkHighUsageAlerts();
-                updateTrayTip();
-                InvalidateRect(hwnd_, nullptr, FALSE);
+                requestMetricsSample(false);
             }
             return 0;
         case WM_PAINT:
@@ -1396,12 +1415,33 @@ private:
             if (wParam == SIZE_MINIMIZED) {
                 hidePanel();
             } else {
-                RECT client{};
-                GetClientRect(hwnd_, &client);
-                SetWindowRgn(hwnd_, CreateRoundRectRgn(0, 0, client.right, client.bottom, 24, 24), TRUE);
+                applyWindowRegion();
                 applyRefreshTimer();
             }
             return 0;
+        case WM_DPICHANGED: {
+            dpi_ = std::max<UINT>(96, HIWORD(wParam));
+            const auto suggested = reinterpret_cast<RECT*>(lParam);
+            MONITORINFO monitorInfo{};
+            monitorInfo.cbSize = sizeof(monitorInfo);
+            HMONITOR monitor = MonitorFromRect(suggested, MONITOR_DEFAULTTONEAREST);
+            RECT workArea = *suggested;
+            if (monitor && GetMonitorInfoW(monitor, &monitorInfo)) {
+                workArea = monitorInfo.rcWork;
+            }
+            const int width = scalePx(kPanelWidth);
+            const int availableHeight = static_cast<int>(workArea.bottom - workArea.top - scalePx(32));
+            const int height = std::min(scalePx(kPanelHeight), std::max(scalePx(560), availableHeight));
+            const int maxX = std::max(static_cast<int>(workArea.left), static_cast<int>(workArea.right) - width);
+            const int maxY = std::max(static_cast<int>(workArea.top), static_cast<int>(workArea.bottom) - height);
+            const int x = std::clamp(static_cast<int>(suggested->left), static_cast<int>(workArea.left), maxX);
+            const int y = std::clamp(static_cast<int>(suggested->top), static_cast<int>(workArea.top), maxY);
+            SetWindowPos(hwnd_, nullptr, x, y, width, height,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            applyWindowRegion();
+            InvalidateRect(hwnd_, nullptr, TRUE);
+            return 0;
+        }
         case WM_EXITSIZEMOVE:
             saveWindowPosition();
             return 0;
@@ -1484,15 +1524,24 @@ private:
                 setTheme(UiTheme::Sakura);
             } else if (LOWORD(wParam) == kMenuThemeForest) {
                 setTheme(UiTheme::Forest);
+            } else if (LOWORD(wParam) >= kMenuDiskBase && LOWORD(wParam) <= kMenuDiskLast) {
+                setDiskDrive(static_cast<wchar_t>(L'A' + LOWORD(wParam) - kMenuDiskBase));
             }
             return 0;
         case kTrayMessage:
             handleTrayMessage(lParam);
             return 0;
+        case kMetricsReadyMessage:
+            handleMetricsReady();
+            return 0;
+        case kQuotaReadyMessage:
+            handleQuotaRefreshComplete();
+            return 0;
         case WM_DESTROY:
             KillTimer(hwnd_, kRefreshTimer);
             unregisterGlobalHotkey();
             removeTrayIcon();
+            stopWorkers();
             PostQuitMessage(0);
             return 0;
         default:
@@ -1506,6 +1555,176 @@ private:
         memoryHistory_.push(metrics_.memory);
         diskHistory_.push(metrics_.disk);
         networkHistory_.push(metrics_.network);
+    }
+
+    REAL dpiScale() const {
+        return std::min(1.0f, static_cast<REAL>(dpi_) / 96.0f);
+    }
+
+    int scalePx(int logical) const {
+        return static_cast<int>(std::round(static_cast<REAL>(logical) * dpiScale()));
+    }
+
+    int unscalePx(int physical) const {
+        return static_cast<int>(std::round(static_cast<REAL>(physical) / dpiScale()));
+    }
+
+    void applyWindowRegion() {
+        if (!hwnd_) {
+            return;
+        }
+        RECT client{};
+        if (!GetClientRect(hwnd_, &client)) {
+            return;
+        }
+        const int radius = scalePx(24);
+        HRGN region = CreateRoundRectRgn(0, 0, client.right + 1, client.bottom + 1, radius, radius);
+        if (!SetWindowRgn(hwnd_, region, TRUE)) {
+            DeleteObject(region);
+        }
+    }
+
+    void startWorkers() {
+        if (workersStarted_) {
+            return;
+        }
+        workersStarted_ = true;
+        workerDiskRoot_ = diskRootPath();
+
+        metricsWorker_ = std::thread([this]() {
+            SystemSampler sampler;
+            std::wstring activeDiskRoot;
+            for (;;) {
+                bool announce = false;
+                std::wstring diskRoot;
+                {
+                    std::unique_lock<std::mutex> lock(workerMutex_);
+                    metricsCv_.wait(lock, [this]() {
+                        return workersStopping_ || metricsRequested_;
+                    });
+                    if (workersStopping_) {
+                        return;
+                    }
+                    metricsRequested_ = false;
+                    announce = metricsAnnounceRequested_;
+                    metricsAnnounceRequested_ = false;
+                    diskRoot = workerDiskRoot_;
+                }
+
+                if (activeDiskRoot != diskRoot) {
+                    sampler.setDiskRoot(diskRoot);
+                    activeDiskRoot = diskRoot;
+                }
+                Metrics result = sampler.collect();
+
+                {
+                    std::lock_guard<std::mutex> lock(workerMutex_);
+                    if (workersStopping_) {
+                        return;
+                    }
+                    readyMetrics_ = std::make_unique<Metrics>(std::move(result));
+                    readyMetricsAnnounce_ = readyMetricsAnnounce_ || announce;
+                }
+                PostMessageW(hwnd_, kMetricsReadyMessage, 0, 0);
+            }
+        });
+
+        quotaWorker_ = std::thread([this]() {
+            CodexQuotaClient client;
+            for (;;) {
+                bool forceRefresh = false;
+                bool announce = false;
+                {
+                    std::unique_lock<std::mutex> lock(workerMutex_);
+                    quotaCv_.wait(lock, [this]() {
+                        return workersStopping_ || quotaRequested_;
+                    });
+                    if (workersStopping_) {
+                        return;
+                    }
+                    quotaRequested_ = false;
+                    forceRefresh = quotaForceRequested_;
+                    announce = quotaAnnounceRequested_;
+                    quotaForceRequested_ = false;
+                    quotaAnnounceRequested_ = false;
+                }
+
+                CodexQuota result = client.fetch(forceRefresh);
+                {
+                    std::lock_guard<std::mutex> lock(workerMutex_);
+                    if (workersStopping_) {
+                        return;
+                    }
+                    readyQuota_ = std::make_unique<CodexQuota>(std::move(result));
+                    readyQuotaAnnounce_ = readyQuotaAnnounce_ || announce;
+                }
+                PostMessageW(hwnd_, kQuotaReadyMessage, 0, 0);
+            }
+        });
+    }
+
+    void stopWorkers() {
+        if (!workersStarted_) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(workerMutex_);
+            workersStopping_ = true;
+            metricsRequested_ = false;
+            quotaRequested_ = false;
+        }
+        metricsCv_.notify_all();
+        quotaCv_.notify_all();
+        if (metricsWorker_.joinable()) {
+            metricsWorker_.join();
+        }
+        if (quotaWorker_.joinable()) {
+            quotaWorker_.join();
+        }
+        workersStarted_ = false;
+        readyMetrics_.reset();
+        readyQuota_.reset();
+    }
+
+    void requestMetricsSample(bool announce) {
+        if (!workersStarted_) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(workerMutex_);
+            if (workersStopping_) {
+                return;
+            }
+            workerDiskRoot_ = diskRootPath();
+            metricsRequested_ = true;
+            metricsAnnounceRequested_ = metricsAnnounceRequested_ || announce;
+        }
+        metricsCv_.notify_one();
+    }
+
+    void handleMetricsReady() {
+        std::unique_ptr<Metrics> result;
+        bool announce = false;
+        {
+            std::lock_guard<std::mutex> lock(workerMutex_);
+            result = std::move(readyMetrics_);
+            announce = readyMetricsAnnounce_;
+            readyMetricsAnnounce_ = false;
+        }
+        if (!result) {
+            return;
+        }
+
+        CodexQuota quota = metrics_.quota;
+        metrics_ = std::move(*result);
+        metrics_.quota = std::move(quota);
+        updateHistory();
+        checkHighUsageAlerts();
+        updateTrayTip();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        if (announce) {
+            showTrayBalloon(L"MiniMonitor", L"状态已刷新。");
+        }
     }
 
     bool readBoolSetting(const wchar_t* name, bool fallback) {
@@ -1674,6 +1893,41 @@ private:
         return theme().name;
     }
 
+    wchar_t systemDriveLetter() {
+        wchar_t windowsDir[MAX_PATH]{};
+        if (GetWindowsDirectoryW(windowsDir, MAX_PATH) > 0 && iswalpha(windowsDir[0])) {
+            return static_cast<wchar_t>(towupper(windowsDir[0]));
+        }
+        return L'C';
+    }
+
+    wchar_t sanitizeDiskDrive(DWORD value) {
+        wchar_t letter = static_cast<wchar_t>(towupper(static_cast<wint_t>(value)));
+        if (letter < L'A' || letter > L'Z') {
+            letter = systemDriveLetter();
+        }
+
+        DWORD drives = GetLogicalDrives();
+        if (drives != 0 && (drives & (1u << (letter - L'A'))) == 0) {
+            letter = systemDriveLetter();
+        }
+        return letter;
+    }
+
+    std::wstring diskRootPath() const {
+        std::wstring root;
+        root.push_back(diskDriveLetter_);
+        root += L":\\";
+        return root;
+    }
+
+    std::wstring diskDisplayName() const {
+        std::wstring name;
+        name.push_back(diskDriveLetter_);
+        name += L":";
+        return name;
+    }
+
     DWORD sanitizeAlertThreshold(DWORD value) {
         if (value == 80 || value == 90 || value == 95) {
             return value;
@@ -1778,21 +2032,28 @@ private:
         return ok;
     }
 
-    POINT startupPanelPosition(const RECT& workArea, int panelHeight) {
-        POINT fallback{workArea.right - kPanelWidth - 16, workArea.top + 16};
+    POINT startupPanelPosition(const RECT& workArea, int panelWidth, int panelHeight) {
+        POINT fallback{workArea.right - panelWidth - scalePx(16), workArea.top + scalePx(16)};
         int x = 0;
         int y = 0;
         if (!readSavedPosition(x, y)) {
             return fallback;
         }
-        const int left = x;
-        const int top = y;
-        const int margin = 24;
-        if (left < workArea.left - kPanelWidth + margin || left > workArea.right - margin ||
-            top < workArea.top - panelHeight + margin || top > workArea.bottom - margin) {
-            return fallback;
+
+        RECT targetWorkArea = workArea;
+        const POINT savedPoint{x, y};
+        HMONITOR monitor = MonitorFromPoint(savedPoint, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO monitorInfo{};
+        monitorInfo.cbSize = sizeof(monitorInfo);
+        if (monitor && GetMonitorInfoW(monitor, &monitorInfo)) {
+            targetWorkArea = monitorInfo.rcWork;
         }
-        return POINT{left, top};
+
+        const int minX = targetWorkArea.left;
+        const int minY = targetWorkArea.top;
+        const int maxX = std::max(minX, static_cast<int>(targetWorkArea.right) - panelWidth);
+        const int maxY = std::max(minY, static_cast<int>(targetWorkArea.bottom) - panelHeight);
+        return POINT{std::clamp(x, minX, maxX), std::clamp(y, minY, maxY)};
     }
 
     bool readSavedPosition(int& x, int& y) {
@@ -1936,9 +2197,7 @@ private:
 
     void populateTrayMenu(HMENU menu) {
         if (!paused_) {
-            metrics_ = sampler_.collect();
-            updateHistory();
-            updateTrayTip();
+            requestMetricsSample(false);
         }
 
         HMENU statusMenu = CreatePopupMenu();
@@ -1959,7 +2218,7 @@ private:
                                    formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
                                    formatBytes(static_cast<double>(metrics_.memoryTotal)));
         appendInfoItem(statusMenu, L"网络 ↓ " + formatSpeed(metrics_.netDown) + L"    ↑ " + formatSpeed(metrics_.netUp));
-        appendInfoItem(statusMenu, L"磁盘 Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
+        appendInfoItem(statusMenu, L"磁盘 " + diskDisplayName() + L" Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
                                    L"    Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A"));
         appendInfoItem(statusMenu, trayQuotaText());
         appendInfoItem(statusMenu, trayTopProcessText());
@@ -1988,9 +2247,13 @@ private:
         HMENU displayMenu = CreatePopupMenu();
         appendInfoItem(displayMenu, L"窗口透明度 " + opacityText());
         appendInfoItem(displayMenu, L"当前主题 " + themeName());
+        appendInfoItem(displayMenu, L"监控磁盘 " + diskDisplayName());
         AppendMenuW(displayMenu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleAlwaysOnTop, L"窗口置顶");
         AppendMenuW(displayMenu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), kMenuToggleLockPosition, L"锁定窗口位置");
         AppendMenuW(displayMenu, MF_SEPARATOR, 0, nullptr);
+        HMENU diskMenu = CreatePopupMenu();
+        populateDiskMenu(diskMenu);
+        AppendMenuW(displayMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(diskMenu), L"监控磁盘");
         HMENU themeMenu = CreatePopupMenu();
         AppendMenuW(themeMenu, MF_STRING | (theme_ == UiTheme::Mono ? MF_CHECKED : MF_UNCHECKED), kMenuThemeMono, L"黑白简约");
         AppendMenuW(themeMenu, MF_STRING | (theme_ == UiTheme::Ocean ? MF_CHECKED : MF_UNCHECKED), kMenuThemeOcean, L"海盐蓝");
@@ -2034,6 +2297,33 @@ private:
 
     void appendInfoItem(HMENU menu, const std::wstring& text) {
         AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, text.c_str());
+    }
+
+    void populateDiskMenu(HMENU menu) {
+        DWORD drives = GetLogicalDrives();
+        if (drives == 0) {
+            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"未发现可用盘符");
+            return;
+        }
+
+        for (wchar_t letter = L'A'; letter <= L'Z'; ++letter) {
+            if ((drives & (1u << (letter - L'A'))) == 0) {
+                continue;
+            }
+            std::wstring root;
+            root.push_back(letter);
+            root += L":\\";
+            UINT type = GetDriveTypeW(root.c_str());
+            if (type == DRIVE_NO_ROOT_DIR || type == DRIVE_CDROM) {
+                continue;
+            }
+
+            std::wstring label;
+            label.push_back(letter);
+            label += L":";
+            UINT flags = MF_STRING | (letter == diskDriveLetter_ ? MF_CHECKED : MF_UNCHECKED);
+            AppendMenuW(menu, flags, kMenuDiskBase + static_cast<UINT>(letter - L'A'), label.c_str());
+        }
     }
 
     std::wstring windowStateText() {
@@ -2089,7 +2379,7 @@ private:
                     formatBytes(static_cast<double>(metrics_.topMemory.front().memory));
         }
         text += L"\r\nNetwork: Down " + formatSpeed(metrics_.netDown) + L"  Up " + formatSpeed(metrics_.netUp);
-        text += L"\r\nDisk: Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
+        text += L"\r\nDisk " + diskDisplayName() + L": Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
                 L"  Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A");
         text += L"\r\n" + trayQuotaText();
         return text;
@@ -2131,6 +2421,7 @@ private:
 
         text += L"\r\nSettings\r\n";
         text += L"  Theme: " + themeName() + L"\r\n";
+        text += L"  Disk: " + diskDisplayName() + L"\r\n";
         text += L"  Refresh interval: " + refreshIntervalText() + L"\r\n";
         text += L"  Background refresh: " + backgroundRefreshText() + L"\r\n";
         text += L"  Opacity: " + opacityText() + L"\r\n";
@@ -2191,9 +2482,7 @@ private:
     }
 
     void copyStatusToClipboard() {
-        metrics_ = sampler_.collect();
-        updateHistory();
-        updateTrayTip();
+        requestMetricsSample(false);
         if (setClipboardText(statusSummaryText())) {
             showTrayBalloon(L"MiniMonitor", L"当前状态已复制到剪贴板。");
         } else {
@@ -2202,9 +2491,7 @@ private:
     }
 
     void exportStatusReport() {
-        metrics_ = sampler_.collect();
-        updateHistory();
-        updateTrayTip();
+        requestMetricsSample(false);
 
         std::wstring folder;
         if (!ensureReportsDirectory(folder)) {
@@ -2277,14 +2564,7 @@ private:
     }
 
     void refreshNow(bool showFeedback) {
-        metrics_ = sampler_.collect();
-        updateHistory();
-        checkHighUsageAlerts();
-        updateTrayTip();
-        InvalidateRect(hwnd_, nullptr, FALSE);
-        if (showFeedback) {
-            showTrayBalloon(L"MiniMonitor", L"状态已刷新。");
-        }
+        requestMetricsSample(showFeedback);
     }
 
     void checkHighUsageAlerts() {
@@ -2422,6 +2702,7 @@ private:
         globalHotkeyEnabled_ = true;
         backgroundEcoMode_ = false;
         theme_ = UiTheme::Mono;
+        diskDriveLetter_ = systemDriveLetter();
         highUsageAlertThreshold_ = kDefaultHighUsageAlertThreshold;
         refreshIntervalMs_ = kDefaultRefreshIntervalMs;
         windowOpacity_ = 255;
@@ -2432,6 +2713,7 @@ private:
         applyGlobalHotkey(false);
         applyRefreshTimer();
         movePanelToDefaultPosition(false);
+        requestMetricsSample(false);
         updateTrayTip();
         InvalidateRect(hwnd_, nullptr, FALSE);
         showTrayBalloon(L"MiniMonitor", L"已恢复默认设置。");
@@ -2503,6 +2785,13 @@ private:
         showTrayBalloon(L"MiniMonitor", L"主题已切换为 " + themeName() + L"。");
     }
 
+    void setDiskDrive(wchar_t letter) {
+        diskDriveLetter_ = sanitizeDiskDrive(static_cast<DWORD>(letter));
+        writeDwordSetting(L"DiskDrive", static_cast<DWORD>(diskDriveLetter_));
+        requestMetricsSample(false);
+        showTrayBalloon(L"MiniMonitor", L"磁盘监控已切换到 " + diskDisplayName() + L"。");
+    }
+
     void toggleLockPosition() {
         lockPosition_ = !lockPosition_;
         writeBoolSetting(L"LockPosition", lockPosition_);
@@ -2567,10 +2856,11 @@ private:
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
         RECT rect{};
         GetWindowRect(hwnd_, &rect);
-        const int height = std::max(560L, rect.bottom - rect.top);
-        const int x = workArea.right - kPanelWidth - 16;
-        const int y = workArea.top + 16;
-        MoveWindow(hwnd_, x, y, kPanelWidth, height, TRUE);
+        const int width = scalePx(kPanelWidth);
+        const int height = std::max(scalePx(560), static_cast<int>(rect.bottom - rect.top));
+        const int x = workArea.right - width - scalePx(16);
+        const int y = workArea.top + scalePx(16);
+        MoveWindow(hwnd_, x, y, width, height, TRUE);
         if (savePosition) {
             saveWindowPosition();
         }
@@ -2650,7 +2940,9 @@ private:
         ScreenToClient(hwnd_, &point);
         RECT client{};
         GetClientRect(hwnd_, &client);
-        if (point.y >= 0 && point.y < 92 && point.x >= 0 && point.x < client.right) {
+        const int logicalX = unscalePx(point.x);
+        const int logicalY = unscalePx(point.y);
+        if (logicalY >= 0 && logicalY < 92 && logicalX >= 0 && logicalX < unscalePx(client.right)) {
             return HTCAPTION;
         }
         return HTCLIENT;
@@ -2659,20 +2951,24 @@ private:
     void handleClick(int x, int y) {
         RECT client{};
         GetClientRect(hwnd_, &client);
-        if (containsPoint(quotaRefreshButtonRect(client.right), x, y)) {
+        x = unscalePx(x);
+        y = unscalePx(y);
+        const int logicalWidth = unscalePx(client.right);
+        const int logicalHeight = unscalePx(client.bottom);
+        if (containsPoint(quotaRefreshButtonRect(logicalWidth), x, y)) {
             refreshCodexQuotaNow();
             return;
         }
 
-        const int bottom = client.bottom - 42;
+        const int bottom = logicalHeight - 42;
         if (y < bottom) {
             return;
         }
-        if (x >= client.right - 62) {
+        if (x >= logicalWidth - 62) {
             DestroyWindow(hwnd_);
-        } else if (x >= client.right - 116) {
+        } else if (x >= logicalWidth - 116) {
             MessageBoxW(hwnd_, L"MiniMonitor\n2 秒刷新，托盘常驻。", L"MiniMonitor", MB_OK | MB_ICONINFORMATION);
-        } else if (x >= client.right - 170) {
+        } else if (x >= logicalWidth - 170) {
             hidePanel();
         }
     }
@@ -2690,6 +2986,18 @@ private:
     }
 
     void refreshCodexQuotaNow() {
+        startCodexQuotaRefresh(true, true);
+    }
+
+    void startCodexQuotaRefresh(bool forceRefresh, bool announceIfBusy) {
+        if (quotaRefreshInProgress_) {
+            if (announceIfBusy) {
+                showTrayBalloon(L"MiniMonitor", L"Codex 额度正在刷新，请稍等。");
+            }
+            return;
+        }
+
+        quotaRefreshInProgress_ = true;
         metrics_.quota.checked = true;
         metrics_.quota.available = false;
         metrics_.quota.status = L"Refreshing";
@@ -2698,22 +3006,51 @@ private:
         metrics_.quota.firstProgress = 0.0;
         metrics_.quota.secondProgress = 0.0;
         metrics_.quota.lastUpdated = L"Updating...";
-        InvalidateRect(hwnd_, nullptr, FALSE);
-        UpdateWindow(hwnd_);
-
-        metrics_ = sampler_.collect(true);
-        updateHistory();
         updateTrayTip();
         InvalidateRect(hwnd_, nullptr, FALSE);
-        if (metrics_.quota.available) {
-            showTrayBalloon(L"Codex 额度已更新",
-                            metrics_.quota.firstLabel + L" " + metrics_.quota.firstUsage + L" / " +
-                                metrics_.quota.fiveHourReset + L"\n" +
-                                metrics_.quota.secondLabel + L" " + metrics_.quota.secondUsage + L" / " +
-                                metrics_.quota.sevenDayReset);
-        } else {
-            showTrayBalloon(L"Codex 额度刷新失败",
-                            metrics_.quota.status + L"。请确认 Codex/ChatGPT 已登录后再刷新。");
+
+        {
+            std::lock_guard<std::mutex> lock(workerMutex_);
+            if (workersStopping_) {
+                quotaRefreshInProgress_ = false;
+                return;
+            }
+            quotaRequested_ = true;
+            quotaForceRequested_ = quotaForceRequested_ || forceRefresh;
+            quotaAnnounceRequested_ = quotaAnnounceRequested_ || forceRefresh;
+        }
+        quotaCv_.notify_one();
+    }
+
+    void handleQuotaRefreshComplete() {
+        std::unique_ptr<CodexQuota> quota;
+        bool announce = false;
+        {
+            std::lock_guard<std::mutex> lock(workerMutex_);
+            quota = std::move(readyQuota_);
+            announce = readyQuotaAnnounce_;
+            readyQuotaAnnounce_ = false;
+        }
+        if (!quota) {
+            return;
+        }
+
+        quotaRefreshInProgress_ = false;
+        metrics_.quota = *quota;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        updateTrayTip();
+
+        if (announce) {
+            if (metrics_.quota.available) {
+                showTrayBalloon(L"Codex 额度已更新",
+                                metrics_.quota.firstLabel + L" " + metrics_.quota.firstUsage + L" / " +
+                                    metrics_.quota.fiveHourReset + L"\n" +
+                                    metrics_.quota.secondLabel + L" " + metrics_.quota.secondUsage + L" / " +
+                                    metrics_.quota.sevenDayReset);
+            } else {
+                showTrayBalloon(L"Codex 额度刷新失败",
+                                metrics_.quota.status + L"。请确认 Codex/ChatGPT 已登录后再刷新。");
+            }
         }
     }
 
@@ -2744,6 +3081,8 @@ private:
         GetClientRect(hwnd_, &client);
         const int width = client.right - client.left;
         const int height = client.bottom - client.top;
+        const int logicalWidth = unscalePx(width);
+        const int logicalHeight = unscalePx(height);
 
         HDC memoryDc = CreateCompatibleDC(hdc);
         HBITMAP bitmap = CreateCompatibleBitmap(hdc, width, height);
@@ -2752,10 +3091,11 @@ private:
         Graphics g(memoryDc);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-        drawBackground(g, width, height);
-        drawHeader(g, width);
-        drawCards(g, width, height);
-        drawWindowFrame(g, width, height);
+        g.ScaleTransform(dpiScale(), dpiScale());
+        drawBackground(g, logicalWidth, logicalHeight);
+        drawHeader(g, logicalWidth);
+        drawCards(g, logicalWidth, logicalHeight);
+        drawWindowFrame(g, logicalWidth, logicalHeight);
 
         BitBlt(hdc, 0, 0, width, height, memoryDc, 0, 0, SRCCOPY);
         SelectObject(memoryDc, oldBitmap);
@@ -2833,13 +3173,15 @@ private:
         drawTopAppsCard(g, RectF(margin, appsY, width - margin * 2.0f, 116));
 
         const REAL rowY = appsY + 128;
-        drawSmallStatCard(g, RectF(margin, rowY, halfW, 76), L"Network",
+        const REAL footerY = static_cast<REAL>(height - 48);
+        const REAL smallCardHeight = std::clamp(footerY - rowY - 8.0f, 64.0f, 76.0f);
+        drawSmallStatCard(g, RectF(margin, rowY, halfW, smallCardHeight), L"Network",
                           L"↓ " + formatSpeed(metrics_.netDown),
                           L"↑ " + formatSpeed(metrics_.netUp),
                           t.accent2, CardIcon::Network);
-        drawSmallStatCard(g, RectF(margin + halfW + gap, rowY, halfW, 76), L"Disk",
+        drawSmallStatCard(g, RectF(margin + halfW + gap, rowY, halfW, smallCardHeight), L"Disk " + diskDisplayName(),
                           formatBytes(static_cast<double>(metrics_.diskUsed)) + L" / " +
-                          formatBytes(static_cast<double>(metrics_.diskTotal)),
+                              formatBytes(static_cast<double>(metrics_.diskTotal)),
                           L"Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A"),
                           t.accent3, CardIcon::Disk);
         drawFooter(g, width, height);
@@ -3126,7 +3468,7 @@ private:
         drawCardIcon(g, RectF(rect.X + rect.Width - 42, rect.Y + 12, 24, 24), icon);
         drawText(g, title, RectF(rect.X + 18, rect.Y + 12, rect.Width - 62, 20), label, t.text);
         drawLegend(g, rect.X + 18, rect.Y + 34, primary, accent);
-        drawLegend(g, rect.X + 18, rect.Y + 56, secondary, t.muted);
+        drawLegend(g, rect.X + 18, rect.Y + rect.Height - 20, secondary, t.muted);
     }
 
     void drawInfoStrip(Graphics& g, RectF rect) {
@@ -3167,8 +3509,8 @@ private:
             } else if (i == 1) {
                 g.DrawEllipse(&pen, cx - 7.0f, cy - 7.0f, 14.0f, 14.0f);
                 g.DrawEllipse(&pen, cx - 2.0f, cy - 2.0f, 4.0f, 4.0f);
-                for (int t = 0; t < 6; ++t) {
-                    const REAL angle = static_cast<REAL>(t) * 3.14159f / 3.0f;
+                for (int tooth = 0; tooth < 6; ++tooth) {
+                    const REAL angle = static_cast<REAL>(tooth) * 3.14159f / 3.0f;
                     const REAL x1 = cx + std::cos(angle) * 10.0f;
                     const REAL y1 = cy + std::sin(angle) * 10.0f;
                     const REAL x2 = cx + std::cos(angle) * 12.0f;
