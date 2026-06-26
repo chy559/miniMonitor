@@ -27,7 +27,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 g++ -std=c++17 -O2 -Wall -Wextra -municode -mwindows -static -static-libgcc -static-libstdc++ `
-  "$Root\src\main.cpp" "$ResFile" `
+  "$Root\src\main.cpp" "$Root\src\format_utils.cpp" "$ResFile" `
   -o "$ExeFile" `
   -lgdiplus -lgdi32 -lmsimg32 -luser32 -lshell32 -ladvapi32 -liphlpapi -lpsapi -lpdh -lwinhttp -lcomctl32
 if ($LASTEXITCODE -ne 0) {

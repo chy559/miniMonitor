@@ -27,6 +27,8 @@
 #include <winhttp.h>
 #include <shellapi.h>
 
+#include "app_models.h"
+#include "format_utils.h"
 #include "monitor_logic.h"
 
 #include <algorithm>
@@ -107,162 +109,17 @@ constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Ru
 constexpr wchar_t kRunValueName[] = L"MiniMonitor";
 constexpr int kPanelWidth = 430;
 constexpr int kPanelHeight = 820;
-constexpr int kHistorySize = 64;
 constexpr int kHotkeyTogglePanel = 2001;
 constexpr UINT kDefaultRefreshIntervalMs = 2000;
 constexpr UINT kBackgroundEcoRefreshIntervalMs = 10000;
 constexpr DWORD kDefaultHighUsageAlertThreshold = 90;
 constexpr ULONGLONG kHighUsageAlertCooldownMs = 5 * 60 * 1000;
 
-struct SampleHistory {
-    std::deque<double> values;
-
-    void push(double value) {
-        value = std::clamp(value, 0.0, 1.0);
-        if (values.size() >= kHistorySize) {
-            values.pop_front();
-        }
-        values.push_back(value);
-    }
-};
-
-struct ProcessRow {
-    std::wstring name;
-    DWORD pid = 0;
-    SIZE_T memory = 0;
-    double cpu = 0.0;
-    double gpu = -1.0;
-};
-
-struct CodexQuota {
-    bool checked = false;
-    bool available = false;
-    bool localAuth = false;
-    std::wstring status = L"Not checked";
-    std::wstring firstLabel = L"5h";
-    std::wstring fiveHour = L"N/A";
-    std::wstring fiveHourReset = L"N/A";
-    std::wstring secondLabel = L"Weekly";
-    std::wstring sevenDay = L"N/A";
-    std::wstring sevenDayReset = L"N/A";
-    std::wstring firstUsage = L"N/A";
-    std::wstring secondUsage = L"N/A";
-    double firstProgress = 0.0;
-    double secondProgress = 0.0;
-    std::wstring lastUpdated = L"Not updated";
-    ULONGLONG lastCheckedTick = 0;
-};
-
-struct QuotaWindow {
-    bool available = false;
-    double usedPercent = 0.0;
-    double windowSeconds = 0.0;
-    double resetAt = 0.0;
-    std::wstring label = L"--";
-    std::wstring remaining = L"N/A";
-    std::wstring reset = L"N/A";
-    std::wstring usage = L"N/A";
-    double progress = 0.0;
-};
-
-enum class CardIcon {
-    Cpu,
-    Gpu,
-    Memory,
-    Codex,
-    Apps,
-    Network,
-    Disk,
-};
-
-enum class UiTheme : DWORD {
-    Mono = 0,
-    Ocean = 1,
-    Sakura = 2,
-    Forest = 3,
-};
-
-struct Metrics {
-    double cpu = 0.0;
-    double gpu = -1.0;
-    double memory = 0.0;
-    double disk = 0.0;
-    double network = 0.0;
-    double diskRead = -1.0;
-    double diskWrite = -1.0;
-    double netDown = 0.0;
-    double netUp = 0.0;
-    unsigned long long memoryUsed = 0;
-    unsigned long long memoryTotal = 0;
-    unsigned long long diskUsed = 0;
-    unsigned long long diskTotal = 0;
-    std::wstring diskRoot = L"C:\\";
-    std::wstring gpuName = L"N/A";
-    std::vector<ProcessRow> topMemory;
-    std::vector<ProcessRow> topCpu;
-    std::vector<ProcessRow> topGpu;
-    CodexQuota quota;
-};
-
-struct CpuSnapshot {
-    ULONGLONG idle = 0;
-    ULONGLONG kernel = 0;
-    ULONGLONG user = 0;
-    bool valid = false;
-};
-
-struct NetworkSnapshot {
-    unsigned long long inBytes = 0;
-    unsigned long long outBytes = 0;
-    ULONGLONG tick = 0;
-    bool valid = false;
-};
-
 ULONGLONG fileTimeToUInt64(const FILETIME& ft) {
     ULARGE_INTEGER li{};
     li.LowPart = ft.dwLowDateTime;
     li.HighPart = ft.dwHighDateTime;
     return li.QuadPart;
-}
-
-std::wstring formatBytes(double bytes) {
-    const wchar_t* units[] = {L"B", L"KB", L"MB", L"GB", L"TB"};
-    int unit = 0;
-    while (bytes >= 1024.0 && unit < 4) {
-        bytes /= 1024.0;
-        ++unit;
-    }
-    wchar_t buffer[64];
-    if (unit == 0) {
-        swprintf(buffer, 64, L"%.0f %s", bytes, units[unit]);
-    } else {
-        swprintf(buffer, 64, L"%.1f %s", bytes, units[unit]);
-    }
-    return buffer;
-}
-
-std::wstring formatSpeed(double bytesPerSecond) {
-    return formatBytes(bytesPerSecond) + L"/s";
-}
-
-std::wstring formatPercent(double value) {
-    wchar_t buffer[32];
-    swprintf(buffer, 32, L"%.0f%%", std::clamp(value, 0.0, 1.0) * 100.0);
-    return buffer;
-}
-
-std::wstring formatOneDecimalPercent(double value) {
-    wchar_t buffer[32];
-    swprintf(buffer, 32, L"%.1f%%", std::max(0.0, value));
-    return buffer;
-}
-
-std::wstring trimForTip(const std::wstring& text) {
-    constexpr size_t kMaxTipChars = 127;
-    if (text.size() <= kMaxTipChars) {
-        return text;
-    }
-    return text.substr(0, kMaxTipChars - 3) + L"...";
 }
 
 std::wstring utf8ToWide(const std::string& value) {
@@ -294,74 +151,6 @@ bool readUtf8File(const std::wstring& path, std::string& out) {
     bool ok = ReadFile(file, out.data(), static_cast<DWORD>(out.size()), &read, nullptr) && read == out.size();
     CloseHandle(file);
     return ok;
-}
-
-std::wstring formatResetDetail(double value) {
-    if (value <= 0.0) {
-        return L"reset N/A";
-    }
-    if (value > 100000000000.0) {
-        value /= 1000.0;
-    }
-
-    std::time_t resetTime = static_cast<std::time_t>(value);
-    std::time_t nowTime = std::time(nullptr);
-    const double diff = std::max(0.0, std::difftime(resetTime, nowTime));
-    const int totalMinutes = static_cast<int>(std::round(diff / 60.0));
-    const int days = totalMinutes / (24 * 60);
-    const int hours = (totalMinutes % (24 * 60)) / 60;
-    const int minutes = totalMinutes % 60;
-
-    std::wstring remaining;
-    if (days > 0) {
-        remaining = std::to_wstring(days) + L"d " + std::to_wstring(hours) + L"h " + std::to_wstring(minutes) + L"m";
-    } else if (hours > 0) {
-        remaining = std::to_wstring(hours) + L"h " + std::to_wstring(minutes) + L"m";
-    } else {
-        remaining = std::to_wstring(minutes) + L"m";
-    }
-
-    std::tm resetLocal{};
-    if (localtime_s(&resetLocal, &resetTime) != 0) {
-        return remaining;
-    }
-
-    wchar_t dateBuffer[32]{};
-    swprintf(dateBuffer, 32, L"%02d/%02d %02d:%02d", resetLocal.tm_mon + 1, resetLocal.tm_mday,
-             resetLocal.tm_hour, resetLocal.tm_min);
-    return remaining + L" (" + dateBuffer + L")";
-}
-
-std::wstring formatCurrentClock() {
-    std::time_t nowTime = std::time(nullptr);
-    std::tm nowLocal{};
-    if (localtime_s(&nowLocal, &nowTime) != 0) {
-        return L"Updated";
-    }
-
-    wchar_t buffer[32]{};
-    swprintf(buffer, 32, L"Updated %02d:%02d:%02d", nowLocal.tm_hour, nowLocal.tm_min, nowLocal.tm_sec);
-    return buffer;
-}
-
-std::wstring quotaWindowLabel(double seconds) {
-    const int rounded = static_cast<int>(std::round(seconds));
-    if (std::abs(rounded - 5 * 60 * 60) <= 60) {
-        return L"5h";
-    }
-    if (std::abs(rounded - 7 * 24 * 60 * 60) <= 60) {
-        return L"Weekly";
-    }
-    if (rounded >= 24 * 60 * 60 && rounded % (24 * 60 * 60) == 0) {
-        return std::to_wstring(rounded / (24 * 60 * 60)) + L"d";
-    }
-    if (rounded >= 60 * 60 && rounded % (60 * 60) == 0) {
-        return std::to_wstring(rounded / (60 * 60)) + L"h";
-    }
-    if (rounded >= 60 && rounded % 60 == 0) {
-        return std::to_wstring(rounded / 60) + L"m";
-    }
-    return L"Limit";
 }
 
 std::wstring computerName() {
