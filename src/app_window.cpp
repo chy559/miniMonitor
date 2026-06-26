@@ -27,6 +27,7 @@
 #include <winhttp.h>
 #include <shellapi.h>
 
+#include "app_commands.h"
 #include "app_window.h"
 #include "app_models.h"
 #include "app_paths.h"
@@ -57,59 +58,6 @@
 
 using namespace Gdiplus;
 namespace {
-
-constexpr UINT_PTR kRefreshTimer = 1001;
-constexpr UINT kTrayMessage = WM_APP + 42;
-constexpr UINT kMetricsReadyMessage = WM_APP + 43;
-constexpr UINT kQuotaReadyMessage = WM_APP + 44;
-constexpr UINT kMenuShow = 1;
-constexpr UINT kMenuExit = 2;
-constexpr UINT kMenuHide = 3;
-constexpr UINT kMenuRefreshQuota = 4;
-constexpr UINT kMenuCopyStatus = 5;
-constexpr UINT kMenuToggleStartHidden = 6;
-constexpr UINT kMenuToggleAutoStart = 7;
-constexpr UINT kMenuResetPosition = 8;
-constexpr UINT kMenuToggleAlwaysOnTop = 9;
-constexpr UINT kMenuTogglePause = 10;
-constexpr UINT kMenuRefreshNow = 11;
-constexpr UINT kMenuRefreshInterval1s = 12;
-constexpr UINT kMenuRefreshInterval2s = 13;
-constexpr UINT kMenuRefreshInterval5s = 14;
-constexpr UINT kMenuOpenTaskManager = 15;
-constexpr UINT kMenuToggleLockPosition = 16;
-constexpr UINT kMenuOpacity100 = 17;
-constexpr UINT kMenuOpacity90 = 18;
-constexpr UINT kMenuOpacity80 = 19;
-constexpr UINT kMenuToggleHighUsageAlerts = 20;
-constexpr UINT kMenuAlertThreshold80 = 21;
-constexpr UINT kMenuAlertThreshold90 = 22;
-constexpr UINT kMenuAlertThreshold95 = 23;
-constexpr UINT kMenuOpenResourceMonitor = 24;
-constexpr UINT kMenuToggleGlobalHotkey = 25;
-constexpr UINT kMenuToggleBackgroundEcoMode = 26;
-constexpr UINT kMenuOpenAppFolder = 27;
-constexpr UINT kMenuResetSettings = 28;
-constexpr UINT kMenuExportStatusReport = 29;
-constexpr UINT kMenuOpenReportsFolder = 30;
-constexpr UINT kMenuClearReports = 31;
-constexpr UINT kMenuThemeMono = 32;
-constexpr UINT kMenuThemeOcean = 33;
-constexpr UINT kMenuThemeSakura = 34;
-constexpr UINT kMenuThemeForest = 35;
-constexpr UINT kMenuDiskBase = 1000;
-constexpr UINT kMenuDiskLast = kMenuDiskBase + 25;
-constexpr int kAppIconResource = 101;
-constexpr wchar_t kClassName[] = L"MiniMonitorWindow";
-constexpr wchar_t kAppTitle[] = L"MiniMonitor";
-constexpr wchar_t kSingletonMutexName[] = L"MiniMonitor.Singleton";
-constexpr int kPanelWidth = 430;
-constexpr int kPanelHeight = 820;
-constexpr int kHotkeyTogglePanel = 2001;
-constexpr UINT kDefaultRefreshIntervalMs = 2000;
-constexpr UINT kBackgroundEcoRefreshIntervalMs = 10000;
-constexpr DWORD kDefaultHighUsageAlertThreshold = 90;
-constexpr ULONGLONG kHighUsageAlertCooldownMs = 5 * 60 * 1000;
 
 std::wstring computerName() {
     wchar_t buffer[MAX_COMPUTERNAME_LENGTH + 1]{};
