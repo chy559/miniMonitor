@@ -27,7 +27,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 g++ -std=c++17 -O2 -Wall -Wextra -municode -mwindows -static -static-libgcc -static-libstdc++ `
-  "$Root\src\main.cpp" "$Root\src\app_window.cpp" "$Root\src\format_utils.cpp" "$Root\src\system_sampler.cpp" "$Root\src\codex_quota_client.cpp" "$Root\src\ui_theme.cpp" "$Root\src\settings_store.cpp" "$ResFile" `
+  "$Root\src\main.cpp" "$Root\src\app_window.cpp" "$Root\src\app_paths.cpp" "$Root\src\format_utils.cpp" "$Root\src\system_sampler.cpp" "$Root\src\codex_quota_client.cpp" "$Root\src\ui_theme.cpp" "$Root\src\settings_store.cpp" "$ResFile" `
   -o "$ExeFile" `
   -lgdiplus -lgdi32 -lmsimg32 -luser32 -lshell32 -ladvapi32 -liphlpapi -lpsapi -lpdh -lwinhttp -lcomctl32
 if ($LASTEXITCODE -ne 0) {
