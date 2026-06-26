@@ -35,6 +35,7 @@
 #include "codex_quota_client.h"
 #include "format_utils.h"
 #include "settings_store.h"
+#include "status_report.h"
 #include "system_sampler.h"
 #include "ui_render_utils.h"
 #include "ui_theme.h"
@@ -953,78 +954,23 @@ private:
     }
 
     std::wstring statusSummaryText() {
-        std::wstring text = L"MiniMonitor 当前状态\r\n";
-        text += L"CPU: " + formatPercent(metrics_.cpu);
-        if (!metrics_.topCpu.empty()) {
-            text += L"  Top: " + metrics_.topCpu.front().name + L" " + formatOneDecimalPercent(metrics_.topCpu.front().cpu);
-        }
-        text += L"\r\nGPU: " + (metrics_.gpu >= 0.0 ? formatPercent(metrics_.gpu) : L"N/A");
-        if (!metrics_.topGpu.empty()) {
-            text += L"  Top: " + metrics_.topGpu.front().name + L" " + formatOneDecimalPercent(metrics_.topGpu.front().gpu);
-        }
-        text += L"\r\nMemory: " + formatPercent(metrics_.memory) + L"  " +
-                formatBytes(static_cast<double>(metrics_.memoryUsed)) + L" / " +
-                formatBytes(static_cast<double>(metrics_.memoryTotal));
-        if (!metrics_.topMemory.empty()) {
-            text += L"  Top: " + metrics_.topMemory.front().name + L" " +
-                    formatBytes(static_cast<double>(metrics_.topMemory.front().memory));
-        }
-        text += L"\r\nNetwork: Down " + formatSpeed(metrics_.netDown) + L"  Up " + formatSpeed(metrics_.netUp);
-        text += L"\r\nDisk " + diskDisplayName() + L": Read " + (metrics_.diskRead >= 0 ? formatSpeed(metrics_.diskRead) : L"N/A") +
-                L"  Write " + (metrics_.diskWrite >= 0 ? formatSpeed(metrics_.diskWrite) : L"N/A");
-        text += L"\r\n" + trayQuotaText();
-        return text;
-    }
-
-    std::wstring processRowsReport(const std::wstring& title, const std::vector<ProcessRow>& rows, const std::wstring& mode) {
-        std::wstring text = title + L"\r\n";
-        if (rows.empty()) {
-            return text + L"  N/A\r\n";
-        }
-        for (const auto& row : rows) {
-            text += L"  " + row.name + L"  PID " + std::to_wstring(row.pid);
-            if (mode == L"cpu") {
-                text += L"  CPU " + formatOneDecimalPercent(row.cpu);
-            } else if (mode == L"memory") {
-                text += L"  MEM " + formatBytes(static_cast<double>(row.memory));
-            } else {
-                text += L"  GPU " + (row.gpu >= 0.0 ? formatOneDecimalPercent(row.gpu) : L"N/A");
-            }
-            text += L"\r\n";
-        }
-        return text;
+        return buildStatusSummaryText(metrics_, diskDisplayName());
     }
 
     std::wstring statusReportText() {
-        std::wstring text = statusSummaryText();
-        text += L"\r\n\r\nTop Processes\r\n";
-        text += processRowsReport(L"CPU", metrics_.topCpu, L"cpu");
-        text += processRowsReport(L"Memory", metrics_.topMemory, L"memory");
-        text += processRowsReport(L"GPU", metrics_.topGpu, L"gpu");
-
-        text += L"\r\nCodex\r\n";
-        text += L"  Status: " + metrics_.quota.status + L"\r\n";
-        text += L"  " + metrics_.quota.firstLabel + L": " + metrics_.quota.firstUsage + L" / " +
-                metrics_.quota.fiveHourReset + L"\r\n";
-        text += L"  " + metrics_.quota.secondLabel + L": " + metrics_.quota.secondUsage + L" / " +
-                metrics_.quota.sevenDayReset + L"\r\n";
-        text += L"  Last updated: " + metrics_.quota.lastUpdated + L"\r\n";
-
-        text += L"\r\nSettings\r\n";
-        text += L"  Theme: " + themeName() + L"\r\n";
-        text += L"  Disk: " + diskDisplayName() + L"\r\n";
-        text += L"  Refresh interval: " + refreshIntervalText() + L"\r\n";
-        text += L"  Background refresh: " + backgroundRefreshText() + L"\r\n";
-        text += L"  Opacity: " + opacityText() + L"\r\n";
-        text += L"  High usage alerts: " + std::wstring(highUsageAlerts_ ? L"On" : L"Off") +
-                L" (" + alertThresholdText() + L")\r\n";
-        text += L"  Always on top: " + std::wstring(alwaysOnTop_ ? L"On" : L"Off") + L"\r\n";
-        text += L"  Position locked: " + std::wstring(lockPosition_ ? L"On" : L"Off") + L"\r\n";
-        text += L"  Global hotkey: " + std::wstring(globalHotkeyRegistered_ ? L"Registered" : L"Off") + L"\r\n";
-        text += L"\r\nGenerated: " + formatCurrentClock() + L"\r\n";
-        return text;
+        StatusReportSettings settings;
+        settings.themeName = themeName();
+        settings.diskDisplayName = diskDisplayName();
+        settings.refreshInterval = refreshIntervalText();
+        settings.backgroundRefresh = backgroundRefreshText();
+        settings.opacity = opacityText();
+        settings.alertThreshold = alertThresholdText();
+        settings.highUsageAlerts = highUsageAlerts_;
+        settings.alwaysOnTop = alwaysOnTop_;
+        settings.lockPosition = lockPosition_;
+        settings.globalHotkeyRegistered = globalHotkeyRegistered_;
+        return buildStatusReportText(metrics_, settings);
     }
-
     bool setClipboardText(const std::wstring& text) {
         if (!OpenClipboard(hwnd_)) {
             return false;
